@@ -6,7 +6,7 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Gestão 37.0 (Compras)", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema Gestão 37.1 (Fix)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 ARQUIVO_LOG = "historico_log.csv"
 
@@ -64,7 +64,7 @@ def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
     else: df = pd.read_csv(ARQUIVO_LOG)
     pd.concat([df, pd.DataFrame([novo])], ignore_index=True).to_csv(ARQUIVO_LOG, index=False)
 
-# --- PDF ROMANEIO (TRANSFERÊNCIA) ---
+# --- PDF ROMANEIO ---
 def criar_pdf_unificado(lista_carga):
     try:
         pdf = FPDF()
@@ -97,7 +97,7 @@ def criar_pdf_unificado(lista_carga):
         return pdf.output(dest='S').encode('latin-1', 'replace')
     except Exception as e: return str(e).encode('utf-8')
 
-# --- PDF PEDIDO (COMPRAS) ---
+# --- PDF PEDIDO ---
 def criar_pdf_compra(dataframe, fornecedor_nome, total_geral):
     try:
         pdf = FPDF()
@@ -161,75 +161,48 @@ df_db = carregar_dados()
 if tela == "Compras":
     st.header("🛒 Gestão de Compras e Abastecimento")
     
-    # 1. Filtros
     col_forn, col_vazio = st.columns([1, 2])
-    
-    # Lista de fornecedores únicos + "Todos"
     lista_fornecedores = ["Todos"] + sorted(list(set(df_db['Fornecedor'].dropna().unique())))
     forn_sel = col_forn.selectbox("Filtrar por Fornecedor:", lista_fornecedores)
     
-    # Reseta cache se trocar de fornecedor
     if forn_sel != st.session_state['ultimo_fornecedor']:
         st.session_state['compras_df_cache'] = None
         st.session_state['compras_key_ver'] += 1
         st.session_state['ultimo_fornecedor'] = forn_sel
-        st.session_state['pedido_pdf'] = None # Limpa pedido anterior
+        st.session_state['pedido_pdf'] = None
         st.session_state['pedido_xlsx'] = None
 
     st.divider()
 
-    # 2. Lógica de Preparação de Dados
-    # Botão Mágico
     if st.button("🪄 Calcular Sugestão (Meta Global - Estoque Total)"):
-        # Cria cópia para cálculo
-        if forn_sel == "Todos":
-            df_calc = df_db.copy()
-        else:
-            df_calc = df_db[df_db['Fornecedor'] == forn_sel].copy()
+        if forn_sel == "Todos": df_calc = df_db.copy()
+        else: df_calc = df_db[df_db['Fornecedor'] == forn_sel].copy()
             
-        # Cálculo: (Min SA + Min SI) - (Central + SA + SI)
-        # *Nota: Aqui assumimos que a meta é a soma dos mínimos. Se quiser estoque de segurança no central, precisaríamos de uma coluna "Min_Central".
-        # Vou assumir que a compra repõe tudo para bater os mínimos das pontas.
-        
         df_calc['Meta Global'] = df_calc['Min_SA'] + df_calc['Min_SI']
         df_calc['Estoque Total'] = df_calc['Estoque_Central'] + df_calc['Estoque_SA'] + df_calc['Estoque_SI']
-        
         df_calc['Sugestao'] = df_calc['Meta Global'] - df_calc['Estoque Total']
-        df_calc['Sugestao'] = df_calc['Sugestao'].apply(lambda x: max(0, int(x))) # Remove negativos
-        
-        # Joga para a coluna editável
+        df_calc['Sugestao'] = df_calc['Sugestao'].apply(lambda x: max(0, int(x)))
         df_calc['Qtd Compra'] = df_calc['Sugestao']
         
-        # Salva no cache
         st.session_state['compras_df_cache'] = df_calc
         st.session_state['compras_key_ver'] += 1
-        st.success("Sugestão calculada com base nos mínimos!")
+        st.success("Sugestão calculada!")
         st.rerun()
 
-    # Recupera ou Cria Cache
     if st.session_state['compras_df_cache'] is not None:
         df_view = st.session_state['compras_df_cache'].copy()
     else:
-        # Se não tem cache, carrega do banco zerado
-        if forn_sel == "Todos":
-            df_view = df_db.copy()
-        else:
-            df_view = df_db[df_db['Fornecedor'] == forn_sel].copy()
-        
-        # Cria colunas de visualização
+        if forn_sel == "Todos": df_view = df_db.copy()
+        else: df_view = df_db[df_db['Fornecedor'] == forn_sel].copy()
         df_view['Meta Global'] = df_view['Min_SA'] + df_view['Min_SI']
         df_view['Estoque Total'] = df_view['Estoque_Central'] + df_view['Estoque_SA'] + df_view['Estoque_SI']
-        df_view['Qtd Compra'] = 0 # Inicia zerado
+        df_view['Qtd Compra'] = 0
 
-    # Filtro de Busca Texto
     busca_compra = st.text_input("🔍 Buscar Produto na Lista:", "")
-    if busca_compra:
-        df_view = df_view[df_view['Produto'].str.contains(busca_compra, case=False, na=False)]
+    if busca_compra: df_view = df_view[df_view['Produto'].str.contains(busca_compra, case=False, na=False)]
 
-    # Cálculo em Tempo Real do Valor (Apenas visual na tabela, não salva no banco ainda)
     df_view['Valor Total'] = df_view['Qtd Compra'] * df_view['Custo']
 
-    # 3. Tabela Editável
     edited_df = st.data_editor(
         df_view[['Produto', 'Fornecedor', 'Padrao', 'Estoque Total', 'Meta Global', 'Custo', 'Qtd Compra']],
         column_config={
@@ -241,13 +214,9 @@ if tela == "Compras":
             "Custo": st.column_config.NumberColumn("Custo Un.", disabled=True, format="R$ %.2f"),
             "Qtd Compra": st.column_config.NumberColumn("🛒 Comprar", min_value=0, step=1, format="%d")
         },
-        use_container_width=True,
-        hide_index=True,
-        height=500,
-        key=f"editor_compras_{st.session_state['compras_key_ver']}"
+        use_container_width=True, hide_index=True, height=500, key=f"editor_compras_{st.session_state['compras_key_ver']}"
     )
     
-    # Rodapé com Totais
     total_itens = edited_df['Qtd Compra'].sum()
     total_valor = (edited_df['Qtd Compra'] * edited_df['Custo']).sum()
     
@@ -256,31 +225,23 @@ if tela == "Compras":
     c_tot1.metric("Itens a Comprar", int(total_itens))
     c_tot2.metric("Valor Estimado", f"R$ {total_valor:,.2f}")
     
-    # 4. Botões de Ação
     c_act1, c_act2, c_act3 = st.columns(3)
     
-    if c_act1.button("📄 Gerar Pedido (PDF)", type="primary"):
-        # Filtra só o que tem compra
+    if c_act1.button("📄 Gerar Pedido (Processar)", type="primary"):
         itens_compra = edited_df[edited_df['Qtd Compra'] > 0].copy()
         itens_compra['Total Item'] = itens_compra['Qtd Compra'] * itens_compra['Custo']
         
-        if itens_compra.empty:
-            st.warning("Nenhum item com quantidade para comprar.")
+        if itens_compra.empty: st.warning("Nenhum item.")
         else:
             pdf_bytes = criar_pdf_compra(itens_compra, forn_sel, total_valor)
             st.session_state['pedido_pdf'] = pdf_bytes
             
-            # Gera Excel também
             buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                itens_compra.to_excel(writer, index=False, sheet_name='Pedido')
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer: itens_compra.to_excel(writer, index=False, sheet_name='Pedido')
             st.session_state['pedido_xlsx'] = buf.getvalue()
-            
-            # Registra Log
             registrar_log("Vários", int(total_itens), "Pedido Compra", f"Forn: {forn_sel} | Valor: R$ {total_valor:.2f}")
             st.rerun()
 
-    # Botões de Download (Aparecem se gerado)
     if st.session_state['pedido_pdf']:
         c_act2.download_button("⬇️ Baixar PDF", st.session_state['pedido_pdf'], "Pedido_Compra.pdf", "application/pdf")
         c_act3.download_button("⬇️ Baixar Excel", st.session_state['pedido_xlsx'], "Pedido_Compra.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -381,7 +342,7 @@ elif tela == "Transferencia":
                             except: df_carga.to_excel(writer, index=False, sheet_name='Romaneio')
                         st.session_state['romaneio_xlsx'] = buf.getvalue()
                         st.rerun()
-                    except: st.error("Erro ao gerar arquivos. Tente limpar e refazer.")
+                    except: st.error("Erro ao gerar arquivos.")
                 if c_btn2.button("🗑️ Limpar"):
                     st.session_state['carga_acumulada'] = []; st.session_state['romaneio_pdf'] = None; st.rerun()
                 if st.session_state['romaneio_pdf']:
@@ -392,7 +353,7 @@ elif tela == "Transferencia":
             else: st.info("Vazia.")
 
 # =================================================================================
-# 📦 TELA DE ESTOQUE (MANTIDA)
+# 📦 TELA DE ESTOQUE
 # =================================================================================
 elif tela == "Estoque":
     st.header("📦 Atualização de Estoque (Contagem)")
@@ -473,7 +434,15 @@ elif tela == "Produtos":
                     cnt+=1
                 salvar_banco(df_db); st.success(f"{cnt} processados!"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
+            
     st.divider()
+    
+    # BOTÃO ZONA DE PERIGO
+    with st.expander("🔥 Apagar Tudo"):
+        if st.button("🗑️ ZERAR BANCO"):
+            cols = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
+            salvar_banco(pd.DataFrame(columns=cols)); st.success("Zerado!"); st.rerun()
+
     a1, a2, a3 = st.tabs(["☕ Café", "🍎 Perecíveis", "📋 Todos"])
     def show(c):
         d = df_db if c=="Todos" else df_db[df_db['Categoria']==c]
