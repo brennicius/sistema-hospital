@@ -10,7 +10,7 @@ ARQUIVO_DADOS = 'estoque_completo.csv'
 ARQUIVO_LOG = 'historico_log.csv'
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-st.set_page_config(page_title="Sistema 27.6 (Smart Upload)", layout="wide")
+st.set_page_config(page_title="Sistema 27.7 (Ref. Inteligente)", layout="wide")
 
 # --- INICIALIZAÇÃO ---
 def init_state():
@@ -23,21 +23,13 @@ def init_state():
 
 init_state()
 
-# --- FUNÇÃO DE LIMPEZA DE NÚMEROS (NOVO) ---
+# --- LIMPEZA DE NÚMEROS ---
 def limpar_numero(valor):
-    """Transforma '10,5 kg', 'R$ 10.00' ou '10' em número puro"""
     if pd.isna(valor): return 0
     if isinstance(valor, (int, float)): return valor
-    
-    # Remove textos comuns e espaços
     v = str(valor).lower().replace('r$', '').replace('kg', '').replace('un', '').replace(' ', '')
-    
-    # Tratamento de pontuação (Brasil vs EUA)
-    if ',' in v and '.' in v: 
-        v = v.replace('.', '').replace(',', '.') # Ex: 1.000,50 -> 1000.50
-    else:
-        v = v.replace(',', '.') # Ex: 10,5 -> 10.5
-        
+    if ',' in v and '.' in v: v = v.replace('.', '').replace(',', '.')
+    else: v = v.replace(',', '.')
     try: return float(v)
     except: return 0
 
@@ -149,7 +141,7 @@ def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
                     suc = 0; err = []
                     for i, r in df_vendas.iterrows():
                         p = str(r[cn]).strip()
-                        q = limpar_numero(r[cq]) # Usa o limpador aqui também
+                        q = limpar_numero(r[cq])
                         if q > 0:
                             mask = (df_geral['Loja'] == loja_selecionada) & (df_geral['Produto'] == p)
                             if mask.any():
@@ -164,7 +156,7 @@ def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- INTERFACE ---
-st.title("🚀 Sistema Integrado 27.6 (Smart Upload)")
+st.title("🚀 Sistema Integrado 27.7")
 df_geral = carregar_dados_cache()
 
 with st.sidebar:
@@ -173,39 +165,50 @@ with st.sidebar:
     st.divider()
     
     if modo in ["Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel"]:
-        with st.expander("📦 Upload Estoque"):
+        with st.expander("📦 Upload Estoque/Referência"):
+            st.info("Atualiza Estoque e Média (Referência).")
             f = st.file_uploader("Arquivo", type=['csv', 'xlsx'], key="ue")
             if f:
                 try:
                     df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
                     
-                    # --- AUTO-MAPA INTELIGENTE ---
+                    # --- AUTO-MAPA INTELIGENTE (ATUALIZADO) ---
                     mapa = {}
                     for c in df.columns:
                         cl = c.lower()
                         if "prod" in cl or "nome" in cl or "item" in cl: mapa[c] = "Produto"
-                        elif any(x in cl for x in ['est', 'qtd', 'quant', 'saldo', 'contagem', 'total']): mapa[c] = "Estoque_Atual"
-                        elif "med" in cl: mapa[c] = "Media_Vendas_Semana"
+                        elif any(x in cl for x in ['est', 'qtd', 'quant', 'saldo', 'contagem', 'total', 'fisico']): mapa[c] = "Estoque_Atual"
+                        # AQUI: Aceita referencia, parametro, meta, minimo como Média
+                        elif any(x in cl for x in ['med', 'méd', 'ref', 'param', 'meta', 'min']): mapa[c] = "Media_Vendas_Semana"
                     
                     df = df.rename(columns=mapa)
                     
                     if "Produto" in df.columns:
-                        if "Estoque_Atual" in df.columns:
-                            # Aplica a limpeza nos números
-                            df["Estoque_Atual"] = df["Estoque_Atual"].apply(limpar_numero)
+                        # Limpa números
+                        if "Estoque_Atual" in df.columns: df["Estoque_Atual"] = df["Estoque_Atual"].apply(limpar_numero)
                         else: df["Estoque_Atual"] = 0
                             
-                        if "Media_Vendas_Semana" not in df.columns: df["Media_Vendas_Semana"] = 0
+                        if "Media_Vendas_Semana" in df.columns: df["Media_Vendas_Semana"] = df["Media_Vendas_Semana"].apply(limpar_numero)
+                        else: df["Media_Vendas_Semana"] = 0
                         
                         df["Loja"] = modo; df["Ultima_Atualizacao"] = datetime.now().strftime("%d/%m %H:%M")
                         
                         ant = df_geral[df_geral['Loja']==modo].set_index('Produto')
                         ant = ant[~ant.index.duplicated(keep='first')]
                         df = df.set_index('Produto')
+                        
+                        # Preserva colunas que não vieram
                         if not ant.empty:
                             df['Fornecedor'] = df.index.map(ant['Fornecedor']).fillna("Geral")
                             df['Custo_Unit'] = df.index.map(ant['Custo_Unit']).fillna(0)
-                        else: df['Fornecedor']="Geral"; df['Custo_Unit']=0
+                            # Se a planilha não trouxe estoque, mantem o antigo
+                            if "Estoque_Atual" not in mapa.values():
+                                df['Estoque_Atual'] = df.index.map(ant['Estoque_Atual']).fillna(0)
+                            # Se não trouxe média, mantem a antiga
+                            if "Media_Vendas_Semana" not in mapa.values():
+                                df['Media_Vendas_Semana'] = df.index.map(ant['Media_Vendas_Semana']).fillna(0)
+                        else: 
+                            df['Fornecedor']="Geral"; df['Custo_Unit']=0
                         
                         out = df_geral[df_geral['Loja']!=modo]
                         salvar_dados(pd.concat([out, df.reset_index()], ignore_index=True))
@@ -225,10 +228,7 @@ with st.sidebar:
                     elif "forn" in cl: mapa[c] = "Fornecedor"
                     elif any(x in cl for x in ['cust', 'pre', 'valor']): mapa[c] = "Custo_Unit"
                 df = df.rename(columns=mapa)
-                
-                # Limpeza Preços
                 if "Custo_Unit" in df.columns: df["Custo_Unit"] = df["Custo_Unit"].apply(limpar_numero)
-                
                 df = df.drop_duplicates('Produto').set_index('Produto')
                 g = df_geral.set_index('Produto')
                 if "Fornecedor" in df.columns: g.update(df[['Fornecedor']])
@@ -352,53 +352,4 @@ elif modo == "Estoque Central":
         df_view['Saldo'] = df_view['Estoque_Atual'] - df_view['Env SA'] - df_view['Env SI']
         cols = ['Produto', 'Estoque_Atual', 'Saldo', 'Tem SA', 'Med SA', 'Env SA', 'Tem SI', 'Med SI', 'Env SI']
         
-        ed = st.data_editor(df_view[cols], column_config={"Estoque_Atual": st.column_config.NumberColumn(disabled=True), "Saldo": st.column_config.NumberColumn(disabled=True), "Tem SA": st.column_config.NumberColumn(disabled=True), "Med SA": st.column_config.NumberColumn(disabled=True), "Tem SI": st.column_config.NumberColumn(disabled=True), "Med SI": st.column_config.NumberColumn(disabled=True)}, use_container_width=True, height=500)
-        
-        if not ed.equals(df_view[cols]):
-            ed.set_index('Produto', inplace=True); df_w.set_index('Produto', inplace=True)
-            df_w.update(ed[['Env SA', 'Env SI']]); df_w.reset_index(inplace=True)
-            st.session_state['df_distribuicao_temp'] = df_w; st.rerun()
-            
-        if st.button("Efetivar"):
-            fin = st.session_state['df_distribuicao_temp']
-            rom = []
-            env = fin[(fin['Env SA']>0)|(fin['Env SI']>0)]
-            if env.empty: st.warning("Nada")
-            else:
-                for i, r in env.iterrows():
-                    sa, si, p = r['Env SA'], r['Env SI'], r['Produto']
-                    idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
-                    if not idx.empty:
-                        df_geral.loc[idx, 'Estoque_Atual'] -= (sa+si)
-                        for l, q, s in [("Hosp. Santo Amaro", sa, "SA"), ("Hosp. Santa Izabel", si, "SI")]:
-                            if q>0:
-                                idl = (df_geral['Loja']==l)&(df_geral['Produto']==p)
-                                if idl.any(): df_geral.loc[idl, 'Estoque_Atual'] += q
-                                else:
-                                    n = df_geral.loc[idx].iloc[0].copy(); n['Loja']=l; n['Estoque_Atual']=q; n['Media_Vendas_Semana']=r.get(f'Med {s}',0)
-                                    df_geral = pd.concat([df_geral, pd.DataFrame([n])], ignore_index=True)
-                        rom.append({"Produto":p, "Env SA":sa, "Env SI":si})
-                        registrar_log(p, sa+si, "Transferência", f"SA:{sa} SI:{si}")
-                salvar_dados(df_geral)
-                pdf = criar_pdf_generico(pd.DataFrame(rom), "ROMANEIO")
-                st.session_state['romaneio_pdf_cache'] = pdf
-                st.session_state['romaneio_final'] = pd.DataFrame(rom)
-                st.session_state['distribuicao_concluida'] = True
-                st.session_state['df_distribuicao_temp'] = None
-                st.rerun()
-
-else:
-    st.subheader(f"Gestão: {modo}")
-    df_l = df_geral[df_geral['Loja'] == modo].copy()
-    if not df_l.empty:
-        renderizar_baixa_por_arquivo(df_geral, modo)
-        
-        # --- BOTÃO EXCEL LOJA ---
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-            df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']].to_excel(writer, index=False, sheet_name='Estoque')
-        st.download_button(f"📊 Baixar Estoque {modo}", buf.getvalue(), f"Estoque_{modo}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        # ------------------------
-        
-        st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
-    else: st.info("Vazio")
+        ed = st.data_editor(df_view[cols], column_config={"Estoque_Atual": st.column_config.NumberColumn(disabled=True), "Saldo": st.column_config.NumberColumn(disabled=True), "Tem SA": st.column_config.NumberColumn(disabled=True), "Med SA": st.column_config.NumberColumn(disabled=True), "Tem SI": st.column_config.NumberColumn(disabled=True), "Med SI": st.column_config.NumberColumn(disabled=True)}, use_container_width=True, height=500
