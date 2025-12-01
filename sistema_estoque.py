@@ -3,22 +3,12 @@ import pandas as pd
 import os
 
 # --- CONFIGURAÇÃO INICIAL ---
-st.set_page_config(page_title="Sistema Gestão 3.1", layout="centered")
+st.set_page_config(page_title="Sistema Gestão 3.2", layout="wide") # Tela cheia para caber os ícones
 ARQUIVO_DADOS = "banco_dados.csv"
 
-# --- CONFIGURAÇÃO DO MENU (VISUAL) ---
-MENU_DADOS = [
-    {"nome": "Estoque", "icone": "📦"},
-    {"nome": "Transferência", "icone": "🚚"},
-    {"nome": "Compras", "icone": "🛒"},
-    {"nome": "Produtos", "icone": "📋"},
-    {"nome": "Vendas", "icone": "📉"},
-    {"nome": "Sugestões", "icone": "💡"}
-]
-
-# --- ESTADO DO MENU ---
-if 'indice_menu' not in st.session_state:
-    st.session_state['indice_menu'] = 3 # Começa em Produtos
+# --- ESTADO DA NAVEGAÇÃO ---
+if 'pagina_atual' not in st.session_state:
+    st.session_state['pagina_atual'] = "Produtos" # Começa no cadastro
 
 # --- FUNÇÕES DE BANCO DE DADOS ---
 def carregar_dados():
@@ -45,98 +35,104 @@ def excluir_produto(produto):
     df = df[df['Produto'] != produto]
     df.to_csv(ARQUIVO_DADOS, index=False)
 
-# --- LAYOUT CARROSSEL MINIMALISTA ---
-st.markdown("<br>", unsafe_allow_html=True)
+# --- MENU DE ÍCONES (O NOVO DESIGN) ---
+st.markdown("<h1 style='text-align: center; color: #4F8BF9;'>Sistema de Gestão Integrado</h1>", unsafe_allow_html=True)
+st.write("") # Espaço
 
-col_esq, col_meio, col_dir = st.columns([1, 4, 1])
+# Cria 6 colunas para os botões
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
-# Botão Anterior
-with col_esq:
-    st.write("") # Espaço para alinhar verticalmente
-    st.write("")
-    if st.button("◀", use_container_width=True):
-        st.session_state['indice_menu'] -= 1
-        if st.session_state['indice_menu'] < 0:
-            st.session_state['indice_menu'] = len(MENU_DADOS) - 1
+# Cada botão define a página atual ao ser clicado
+with c1:
+    if st.button("📦\nEstoque", use_container_width=True): st.session_state['pagina_atual'] = "Estoque"
+with c2:
+    if st.button("🚚\nTransf.", use_container_width=True): st.session_state['pagina_atual'] = "Transferência"
+with c3:
+    if st.button("🛒\nCompras", use_container_width=True): st.session_state['pagina_atual'] = "Compras"
+with c4:
+    if st.button("📋\nProdutos", use_container_width=True): st.session_state['pagina_atual'] = "Produtos"
+with c5:
+    if st.button("📉\nVendas", use_container_width=True): st.session_state['pagina_atual'] = "Vendas"
+with c6:
+    if st.button("💡\nSugestões", use_container_width=True): st.session_state['pagina_atual'] = "Sugestões"
 
-# Botão Próximo
-with col_dir:
-    st.write("")
-    st.write("")
-    if st.button("▶", use_container_width=True):
-        st.session_state['indice_menu'] += 1
-        if st.session_state['indice_menu'] >= len(MENU_DADOS):
-            st.session_state['indice_menu'] = 0
+st.markdown("<hr>", unsafe_allow_html=True) # Linha separadora
 
-# O Desenho Central
-item_atual = MENU_DADOS[st.session_state['indice_menu']]
+# --- CONTEÚDO DAS TELAS (RENDERIZAÇÃO CONDICIONAL) ---
+pagina = st.session_state['pagina_atual']
 
-with col_meio:
-    # CSS para deixar o ícone gigante e centralizado
-    st.markdown(
-        f"""
-        <div style="text-align: center;">
-            <div style="font-size: 80px; line-height: 1;">{item_atual['icone']}</div>
-            <div style="font-size: 16px; color: gray; font-weight: bold; margin-top: 10px;">{item_atual['nome']}</div>
-        </div>
-        <hr style="margin-top: 5px; margin-bottom: 20px;">
-        """, 
-        unsafe_allow_html=True
-    )
+# 1. TELA DE ESTOQUE
+if pagina == "Estoque":
+    st.subheader("📦 Controle de Estoque")
+    st.info("Aqui você dará entrada (compras que chegaram) e baixa (consumo/perda).")
+    # (Código da Parte 3 entrará aqui)
 
-# --- CONTEÚDO DAS TELAS ---
+# 2. TELA DE TRANSFERÊNCIA
+elif pagina == "Transferência":
+    st.subheader("🚚 Transferência entre Locais")
+    st.info("Mova produtos do Central para os Hospitais.")
 
-# 1. ESTOQUE
-if item_atual['nome'] == "Estoque":
-    st.info("Aqui você verá a lista de produtos e saldo.")
-    # (Código da Parte 3 virá aqui)
+# 3. TELA DE COMPRAS
+elif pagina == "Compras":
+    st.subheader("🛒 Pedidos de Compra")
+    st.info("Gera lista do que precisa comprar.")
 
-# 2. TRANSFERÊNCIA
-elif item_atual['nome'] == "Transferência":
-    st.info("Mover produtos entre locais.")
-
-# 3. COMPRAS
-elif item_atual['nome'] == "Compras":
-    st.info("Gerar pedidos.")
-
-# 4. PRODUTOS (CADASTRO)
-elif item_atual['nome'] == "Produtos":
-    df_atual = carregar_dados()
-    aba_cafe, aba_pereciveis = st.tabs(["☕ Café", "🍎 Perecíveis"])
+# 4. TELA DE PRODUTOS (JÁ FUNCIONANDO)
+elif pagina == "Produtos":
+    st.subheader("📋 Cadastro de Produtos")
     
-    def renderizar_aba(categoria_nome):
-        # Cadastro Minimalista
-        with st.expander(f"➕ Novo Item"):
-            with st.form(key=f"form_{categoria_nome}"):
-                nome = st.text_input("Nome")
-                c1, c2 = st.columns(2)
-                forn = c1.text_input("Fornecedor")
-                custo = c2.number_input("Custo R$", 0.0, step=0.1)
-                minimo = st.number_input("Mínimo", 1)
-                if st.form_submit_button("Salvar", use_container_width=True):
+    df_atual = carregar_dados()
+    aba_cafe, aba_pereciveis = st.tabs(["☕ Café & Insumos", "🍎 Perecíveis"])
+    
+    def renderizar_cadastro(categoria_nome):
+        # Formulário de Cadastro
+        with st.container(border=True):
+            st.markdown(f"**Novo Item: {categoria_nome}**")
+            c_nome, c_forn = st.columns(2)
+            nome = c_nome.text_input("Nome do Produto", key=f"n_{categoria_nome}")
+            forn = c_forn.text_input("Fornecedor", key=f"f_{categoria_nome}")
+            
+            c_custo, c_min, c_btn = st.columns([1, 1, 1])
+            custo = c_custo.number_input("Custo R$", 0.0, step=0.1, key=f"c_{categoria_nome}")
+            minimo = c_min.number_input("Mínimo", 1, key=f"m_{categoria_nome}")
+            
+            st.write("") # Espaço para alinhar botão
+            if c_btn.button("Salvar Produto", key=f"b_{categoria_nome}", use_container_width=True):
+                if nome:
                     ok, msg = salvar_novo_produto(nome, categoria_nome, forn, custo, minimo)
                     if ok: st.success(msg); st.rerun()
                     else: st.error(msg)
-        
-        # Lista
+                else:
+                    st.warning("Digite o nome.")
+
+        # Lista de Produtos
+        st.write("")
         df_filtro = df_atual[df_atual['Categoria'] == categoria_nome]
+        
         if not df_filtro.empty:
-            st.dataframe(df_filtro[['Produto', 'Saldo', 'Fornecedor']], use_container_width=True, hide_index=True)
+            st.dataframe(
+                df_filtro[['Produto', 'Saldo', 'Fornecedor', 'Custo']], 
+                use_container_width=True, 
+                hide_index=True
+            )
             
-            c_del1, c_del2 = st.columns([4, 1])
-            p_del = c_del1.selectbox("Apagar:", df_filtro['Produto'].unique(), key=f"s_{categoria_nome}", label_visibility="collapsed", index=None, placeholder="Selecione para excluir...")
-            if p_del and c_del2.button("🗑️", key=f"b_{categoria_nome}"):
-                excluir_produto(p_del); st.rerun()
+            # Botão de Excluir no final
+            with st.expander("🗑️ Área de Exclusão"):
+                p_del = st.selectbox("Produto para apagar:", df_filtro['Produto'].unique(), key=f"del_{categoria_nome}")
+                if st.button("Confirmar Exclusão", key=f"btn_del_{categoria_nome}"):
+                    excluir_produto(p_del); st.rerun()
         else:
-            st.caption("Nada aqui ainda.")
+            st.info("Nenhum produto cadastrado.")
 
-    with aba_cafe: renderizar_aba("Café")
-    with aba_pereciveis: renderizar_aba("Perecíveis")
+    with aba_cafe: renderizar_cadastro("Café")
+    with aba_pereciveis: renderizar_cadastro("Perecíveis")
 
-# 5. VENDAS
-elif item_atual['nome'] == "Vendas":
-    st.info("Upload de planilhas.")
+# 5. TELA DE VENDAS
+elif pagina == "Vendas":
+    st.subheader("📉 Baixa via Planilha")
+    st.info("Importe seu Excel de vendas aqui.")
 
-# 6. SUGESTÕES
-elif item_atual['nome'] == "Sugestões":
-    st.info("Inteligência Artificial.")
+# 6. TELA DE SUGESTÕES
+elif pagina == "Sugestões":
+    st.subheader("💡 Inteligência")
+    st.info("Dicas automáticas de gestão.")
