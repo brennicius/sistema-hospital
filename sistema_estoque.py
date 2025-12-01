@@ -6,18 +6,20 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Gestão 34.0 (PDF Lado a Lado)", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema Gestão 35.0 (Excel + Remoção)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 ARQUIVO_LOG = "historico_log.csv"
 
 # --- INICIALIZAÇÃO DE ESTADO ---
 def init_state():
     if 'romaneio_pdf' not in st.session_state: st.session_state['romaneio_pdf'] = None
+    if 'romaneio_xlsx' not in st.session_state: st.session_state['romaneio_xlsx'] = None
     if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Transferencia"
     if 'selecao_exclusao' not in st.session_state: st.session_state['selecao_exclusao'] = []
+    # Lista acumulativa
     if 'carga_acumulada' not in st.session_state: st.session_state['carga_acumulada'] = []
     
-    # Estados para o Auto-Fill
+    # Estados Auto-Fill
     if 'transf_key_ver' not in st.session_state: st.session_state['transf_key_ver'] = 0
     if 'transf_last_dest' not in st.session_state: st.session_state['transf_last_dest'] = ""
     if 'transf_df_cache' not in st.session_state: st.session_state['transf_df_cache'] = None
@@ -56,56 +58,42 @@ def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
     else: df = pd.read_csv(ARQUIVO_LOG)
     pd.concat([df, pd.DataFrame([novo])], ignore_index=True).to_csv(ARQUIVO_LOG, index=False)
 
-# --- PDF MATRIZ (LADO A LADO) ---
 def criar_pdf_unificado(lista_carga):
     try:
         pdf = FPDF()
         pdf.add_page()
-        
-        # Título
         pdf.set_font("Arial", 'B', 16)
         pdf.cell(190, 10, txt="ROMANEIO DE ENTREGA UNIFICADO", ln=True, align='C')
         pdf.set_font("Arial", size=10)
         pdf.cell(190, 10, txt=f"Data Emissao: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align='C')
         pdf.ln(10)
         
-        # TRANSFORMA LISTA EM TABELA LADO A LADO (PIVOT)
+        # PIVOT PARA MATRIZ
         df = pd.DataFrame(lista_carga)
-        
-        # Agrupa por Produto e Destino somando quantidades
-        # Depois joga os Destinos para as colunas (Pivot)
         df_pivot = df.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
         
-        # Garante que as colunas existam mesmo que ninguém mande nada pra lá
         col_sa = "Hospital Santo Amaro"
         col_si = "Hospital Santa Izabel"
-        
         if col_sa not in df_pivot.columns: df_pivot[col_sa] = 0
         if col_si not in df_pivot.columns: df_pivot[col_si] = 0
         
-        # CABEÇALHO DA TABELA
-        pdf.set_fill_color(200, 220, 255) # Azul
+        # TABELA
+        pdf.set_fill_color(200, 220, 255)
         pdf.set_font("Arial", 'B', 10)
-        
-        # Larguras: Nome(110) | Sto Amaro(40) | Sta Izabel(40)
         pdf.cell(110, 10, "Produto", 1, 0, 'C', fill=True)
         pdf.cell(40, 10, "Qtd Sto Amaro", 1, 0, 'C', fill=True)
         pdf.cell(40, 10, "Qtd Sta Izabel", 1, 1, 'C', fill=True)
         
-        # LINHAS DA TABELA
         pdf.set_font("Arial", size=10)
-        
         for index, row in df_pivot.iterrows():
             prod = str(row['Produto']).encode('latin-1', 'replace').decode('latin-1')[:55]
             qtd_sa = str(int(row[col_sa])) if row[col_sa] > 0 else "-"
             qtd_si = str(int(row[col_si])) if row[col_si] > 0 else "-"
             
-            # Zebrado simples (opcional, aqui fundo branco)
             pdf.cell(110, 8, prod, 1, 0, 'L')
             pdf.cell(40, 8, qtd_sa, 1, 0, 'C')
             pdf.cell(40, 8, qtd_si, 1, 1, 'C')
 
-        # ASSINATURAS
         pdf.ln(20)
         pdf.cell(60, 10, "_"*30, 0, 0, 'C'); pdf.cell(5, 10, "", 0, 0); pdf.cell(60, 10, "_"*30, 0, 0, 'C'); pdf.cell(5, 10, "", 0, 0); pdf.cell(60, 10, "_"*30, 0, 1, 'C')
         pdf.set_font("Arial", size=8)
@@ -139,14 +127,14 @@ tela = st.session_state['tela_atual']
 df_db = carregar_dados()
 
 # =================================================================================
-# 🚚 TELA DE TRANSFERÊNCIA (MATRIZ LADO A LADO)
+# 🚚 TELA DE TRANSFERÊNCIA (FINAL)
 # =================================================================================
 if tela == "Transferencia":
     st.header("🚚 Transferência / Montagem de Carga")
     
     col_esquerda, col_direita = st.columns([1.5, 1])
     
-    # --- LADO ESQUERDO: SELEÇÃO E ENVIO ---
+    # --- LADO ESQUERDO: ENVIO ---
     with col_esquerda:
         with st.container(border=True):
             st.markdown("### 1. Adicionar Itens")
@@ -154,32 +142,25 @@ if tela == "Transferencia":
             lojas_opcoes = ["Hospital Santo Amaro", "Hospital Santa Izabel"]
             destino_sel = st.selectbox("Para onde vai?", lojas_opcoes)
             
-            # Reseta o cache se mudar de loja
             if destino_sel != st.session_state['transf_last_dest']:
                 st.session_state['transf_df_cache'] = None
                 st.session_state['transf_key_ver'] += 1
                 st.session_state['transf_last_dest'] = destino_sel
             
             if "Amaro" in destino_sel:
-                col_estoque_loja = "Estoque_SA"
-                col_minimo = "Min_SA"
+                col_estoque_loja = "Estoque_SA"; col_minimo = "Min_SA"
             else:
-                col_estoque_loja = "Estoque_SI"
-                col_minimo = "Min_SI"
+                col_estoque_loja = "Estoque_SI"; col_minimo = "Min_SI"
             
-            # Botão Mágico de Auto-Preenchimento
-            if st.button("🪄 Preencher Sugestão (Meta - Atual)", help="Calcula o que falta para atingir o mínimo"):
+            if st.button("🪄 Preencher Sugestão (Meta - Atual)"):
                 df_calc = df_db[['Produto', 'Estoque_Central', col_estoque_loja, col_minimo]].copy()
                 df_calc['Sugestao'] = df_calc[col_minimo] - df_calc[col_estoque_loja]
                 df_calc['Sugestao'] = df_calc['Sugestao'].apply(lambda x: max(0, x))
                 df_calc['➡️ Enviar'] = df_calc[['Sugestao', 'Estoque_Central']].min(axis=1)
-                
                 st.session_state['transf_df_cache'] = df_calc
                 st.session_state['transf_key_ver'] += 1
-                st.success("Valores preenchidos! Revise na tabela abaixo.")
-                st.rerun()
+                st.success("Preenchido!"); st.rerun()
 
-            # Prepara Tabela
             if st.session_state['transf_df_cache'] is not None:
                 df_view = st.session_state['transf_df_cache'].copy()
             else:
@@ -187,85 +168,98 @@ if tela == "Transferencia":
                 df_view['➡️ Enviar'] = 0.0
 
             busca = st.text_input("🔍 Buscar Produto:", "")
-            if busca:
-                df_view = df_view[df_view['Produto'].str.contains(busca, case=False, na=False)]
+            if busca: df_view = df_view[df_view['Produto'].str.contains(busca, case=False, na=False)]
             
             edited_df = st.data_editor(
                 df_view,
                 column_config={
                     "Produto": st.column_config.TextColumn(disabled=True),
                     "Estoque_Central": st.column_config.NumberColumn("Central", disabled=True, format="%.0f"),
-                    col_estoque_loja: st.column_config.NumberColumn("Loja Atual", disabled=True, format="%.0f"),
+                    col_estoque_loja: st.column_config.NumberColumn("Loja", disabled=True, format="%.0f"),
                     col_minimo: st.column_config.NumberColumn("Meta", disabled=True, format="%.0f"),
                     "➡️ Enviar": st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.0f"),
                     "Sugestao": None
                 },
-                use_container_width=True,
-                hide_index=True,
-                height=400,
-                key=f"editor_transf_{st.session_state['transf_key_ver']}"
+                use_container_width=True, hide_index=True, height=400, key=f"editor_transf_{st.session_state['transf_key_ver']}"
             )
             
             if st.button("📦 Adicionar à Carga (Sem Finalizar)", type="primary"):
                 itens_enviar = edited_df[edited_df['➡️ Enviar'] > 0]
-                
-                if itens_enviar.empty:
-                    st.warning("Preencha a quantidade em 'Enviar'.")
+                if itens_enviar.empty: st.warning("Preencha a quantidade.")
                 else:
-                    erro = False
-                    temp_lista = []
-                    
+                    erro = False; temp_lista = []
                     for idx, row in itens_enviar.iterrows():
-                        prod = row['Produto']
-                        qtd = row['➡️ Enviar']
-                        
+                        prod = row['Produto']; qtd = row['➡️ Enviar']
                         idx_db = df_db[df_db['Produto'] == prod].index[0]
-                        saldo_real_central = df_db.at[idx_db, 'Estoque_Central']
+                        saldo_real = df_db.at[idx_db, 'Estoque_Central']
                         
-                        if qtd > saldo_real_central:
-                            st.error(f"Erro: '{prod}' só tem {saldo_real_central} no Central. Tentou enviar {qtd}.")
-                            erro = True
-                            break
+                        if qtd > saldo_real: st.error(f"Erro: {prod} só tem {saldo_real}."); erro = True; break
                         
                         df_db.at[idx_db, 'Estoque_Central'] -= qtd
                         if "Amaro" in destino_sel: df_db.at[idx_db, 'Estoque_SA'] += qtd
                         else: df_db.at[idx_db, 'Estoque_SI'] += qtd
                         
                         registrar_log(prod, qtd, "Transferência", f"Central -> {destino_sel}")
-                        temp_lista.append({
-                            "Destino": destino_sel,
-                            "Produto": prod,
-                            "Quantidade": qtd
-                        })
+                        temp_lista.append({"Destino": destino_sel, "Produto": prod, "Quantidade": qtd})
                     
                     if not erro:
                         salvar_banco(df_db)
                         st.session_state['carga_acumulada'].extend(temp_lista)
-                        st.session_state['transf_df_cache'] = None 
+                        st.session_state['transf_df_cache'] = None
                         st.session_state['transf_key_ver'] += 1
-                        st.success(f"{len(temp_lista)} itens adicionados à carga!")
-                        st.rerun()
+                        st.success(f"{len(temp_lista)} adicionados!"); st.rerun()
 
-    # --- LADO DIREITO: CARGA ACUMULADA ---
+    # --- LADO DIREITO: CARGA E REMOÇÃO ---
     with col_direita:
         with st.container(border=True):
             st.markdown("### 2. Carga Completa")
             
             if len(st.session_state['carga_acumulada']) > 0:
+                # --- NOVO: REMOVER ITEM ---
+                with st.expander("❌ Remover Item da Lista"):
+                    # Cria lista para seleção
+                    lista_display = [f"{i} | {d['Produto']} -> {d['Destino']} ({d['Quantidade']})" for i, d in enumerate(st.session_state['carga_acumulada'])]
+                    itens_remover = st.multiselect("Selecione para cancelar:", lista_display)
+                    
+                    if st.button("Confirmar Remoção"):
+                        indices_remover = [int(s.split(" | ")[0]) for s in itens_remover]
+                        
+                        for idx in indices_remover:
+                            item = st.session_state['carga_acumulada'][idx]
+                            # Estorna Estoque
+                            p = item['Produto']; q = item['Quantidade']; dest = item['Destino']
+                            
+                            idx_db = df_db[df_db['Produto'] == p].index
+                            if not idx_db.empty:
+                                i_db = idx_db[0]
+                                df_db.at[i_db, 'Estoque_Central'] += q # Devolve pro Central
+                                if "Amaro" in dest: df_db.at[i_db, 'Estoque_SA'] -= q
+                                else: df_db.at[i_db, 'Estoque_SI'] -= q
+                        
+                        # Atualiza lista removendo os índices
+                        st.session_state['carga_acumulada'] = [val for i, val in enumerate(st.session_state['carga_acumulada']) if i not in indices_remover]
+                        salvar_banco(df_db)
+                        st.success("Itens removidos e estoque estornado!")
+                        st.rerun()
+
+                # MOSTRA TABELA RESUMO (PIVOTADA)
                 df_carga = pd.DataFrame(st.session_state['carga_acumulada'])
-                
-                # Visualização Pivotada na Tela (Lado a Lado)
                 try:
-                    df_pivot_view = df_carga.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
-                    st.dataframe(df_pivot_view, use_container_width=True, hide_index=True, height=300)
-                except:
-                    st.dataframe(df_carga, use_container_width=True) # Fallback
+                    df_pivot = df_carga.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
+                    st.dataframe(df_pivot, use_container_width=True, hide_index=True, height=300)
+                except: st.dataframe(df_carga, use_container_width=True)
                 
                 c_btn1, c_btn2 = st.columns(2)
                 
-                if c_btn1.button("🖨️ Gerar PDF Unificado"):
+                if c_btn1.button("✅ Finalizar (Gerar Docs)"):
                     pdf_bytes = criar_pdf_unificado(st.session_state['carga_acumulada'])
                     st.session_state['romaneio_pdf'] = pdf_bytes
+                    
+                    # Gera Excel também
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                        df_pivot.to_excel(writer, index=False, sheet_name='Romaneio')
+                    st.session_state['romaneio_xlsx'] = buf.getvalue()
                     st.rerun()
                     
                 if c_btn2.button("🗑️ Limpar Tudo"):
@@ -273,14 +267,12 @@ if tela == "Transferencia":
                     st.session_state['romaneio_pdf'] = None
                     st.rerun()
                 
+                # ÁREA DE DOWNLOAD
                 if st.session_state['romaneio_pdf']:
-                    st.success("PDF Pronto!")
-                    st.download_button(
-                        label="📄 Baixar Arquivo PDF",
-                        data=st.session_state['romaneio_pdf'],
-                        file_name=f"Romaneio_Unificado_{datetime.now().strftime('%H%M')}.pdf",
-                        mime="application/pdf"
-                    )
+                    st.success("Documentos Prontos!")
+                    c_down1, c_down2 = st.columns(2)
+                    c_down1.download_button("📄 Baixar PDF", st.session_state['romaneio_pdf'], f"Romaneio_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
+                    c_down2.download_button("📊 Baixar Excel", st.session_state['romaneio_xlsx'], f"Romaneio_{datetime.now().strftime('%H%M')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
                 st.info("A carga está vazia.")
 
