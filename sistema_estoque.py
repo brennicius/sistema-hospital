@@ -10,7 +10,7 @@ ARQUIVO_DADOS = 'estoque_completo.csv'
 ARQUIVO_LOG = 'historico_log.csv'
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-st.set_page_config(page_title="Sistema 27.4 (Excel)", layout="wide")
+st.set_page_config(page_title="Sistema 27.5 (Excel Lojas)", layout="wide")
 
 # --- INICIALIZAÇÃO DE ESTADO ---
 def init_state():
@@ -65,20 +65,17 @@ def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
         pdf.set_font("Arial", size=10)
         pdf.cell(190, 10, txt=f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align='C')
         pdf.ln(5)
-        
         cols = dataframe.columns.tolist()
         if not colunas_largura:
             largura_base = 190 // len(cols)
             larguras = [largura_base] * len(cols)
             if "Produto" in cols: idx = cols.index("Produto"); larguras[idx] = 80 
         else: larguras = colunas_largura
-
         pdf.set_font("Arial", 'B', 9)
         for i, col in enumerate(cols):
             txt = str(col).encode('latin-1', 'replace').decode('latin-1')
             pdf.cell(larguras[i], 10, txt[:20], 1, 0, 'C')
         pdf.ln()
-        
         pdf.set_font("Arial", size=9)
         for index, row in dataframe.iterrows():
             for i, col in enumerate(cols):
@@ -88,8 +85,7 @@ def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
                 pdf.cell(larguras[i], 10, texto[:45], 1, 0, align)
             pdf.ln()
         return pdf.output(dest='S').encode('latin-1', 'replace')
-    except Exception as e:
-        return str(e).encode('utf-8')
+    except Exception as e: return str(e).encode('utf-8')
 
 # --- MÉTODOS AUXILIARES ---
 def resetar_processos():
@@ -154,7 +150,7 @@ def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- INTERFACE ---
-st.title("🚀 Sistema Integrado 27.4")
+st.title("🚀 Sistema Integrado 27.5")
 df_geral = carregar_dados_cache()
 
 with st.sidebar:
@@ -171,15 +167,14 @@ with st.sidebar:
                     mapa = {}
                     for c in df.columns:
                         cl = c.lower()
-                        if "prod" in cl: mapa[c] = "Produto"
-                        elif "est" in cl or "qtd" in cl: mapa[c] = "Estoque_Atual"
+                        if "prod" in c: mapa[c] = "Produto"
+                        elif "est" in c or "qtd" in c: mapa[c] = "Estoque_Atual"
                         elif "med" in cl: mapa[c] = "Media_Vendas_Semana"
                     df = df.rename(columns=mapa)
                     if "Produto" in df.columns:
                         if "Estoque_Atual" not in df.columns: df["Estoque_Atual"]=0
                         if "Media_Vendas_Semana" not in df.columns: df["Media_Vendas_Semana"]=0
                         df["Loja"] = modo; df["Ultima_Atualizacao"] = datetime.now().strftime("%d/%m %H:%M")
-                        
                         ant = df_geral[df_geral['Loja']==modo].set_index('Produto')
                         ant = ant[~ant.index.duplicated(keep='first')]
                         df = df.set_index('Produto')
@@ -187,7 +182,6 @@ with st.sidebar:
                             df['Fornecedor'] = df.index.map(ant['Fornecedor']).fillna("Geral")
                             df['Custo_Unit'] = df.index.map(ant['Custo_Unit']).fillna(0)
                         else: df['Fornecedor']="Geral"; df['Custo_Unit']=0
-                        
                         out = df_geral[df_geral['Loja']!=modo]
                         salvar_dados(pd.concat([out, df.reset_index()], ignore_index=True))
                         resetar_processos(); st.success("Ok!"); st.rerun()
@@ -249,21 +243,17 @@ elif modo == "📜 Histórico":
 
 elif modo == "🛒 Compras":
     st.subheader("Compras")
-    
     if st.session_state['df_compras_temp'] is None:
         base = df_geral[df_geral['Loja']=="Estoque Central"][['Produto','Fornecedor','Custo_Unit']].copy()
         base = base.drop_duplicates('Produto').sort_values('Produto')
         base['Qtd'] = 0 
         st.session_state['df_compras_temp'] = base
     
-    if 'Qtd' not in st.session_state['df_compras_temp'].columns:
-        st.session_state['df_compras_temp'] = None
-        st.rerun()
+    if 'Qtd' not in st.session_state['df_compras_temp'].columns: st.session_state['df_compras_temp'] = None; st.rerun()
 
     view = st.session_state['df_compras_temp']
     f_list = ["Todos"] + sorted(view['Fornecedor'].unique().tolist())
     sel = st.selectbox("Fornecedor", f_list)
-    
     edit = view[view['Fornecedor']==sel].copy() if sel!="Todos" else view.copy()
     edit['Total'] = edit['Qtd'] * edit['Custo_Unit']
     
@@ -276,38 +266,21 @@ elif modo == "🛒 Compras":
     
     total_ped = ed['Total'].sum()
     st.metric("Total", f"R$ {total_ped:,.2f}")
-    
     c1, c2 = st.columns(2)
-    
-    # 1. BOTÃO PDF
     with c1:
         if st.button("📄 Baixar Pedido PDF"):
-            i = st.session_state['df_compras_temp'].copy()
-            i['Total'] = i['Qtd'] * i['Custo_Unit']
-            i = i[i['Qtd']>0]
+            i = st.session_state['df_compras_temp'].copy(); i['Total'] = i['Qtd'] * i['Custo_Unit']; i = i[i['Qtd']>0]
             if not i.empty:
                 pdf_bytes = criar_pdf_generico(i[['Produto','Fornecedor','Qtd','Total']], "PEDIDO DE COMPRA", [90,50,20,30])
                 st.download_button("Clique para Baixar PDF", pdf_bytes, "Pedido.pdf", "application/pdf")
                 registrar_log("Vários", len(i), "Compra", f"R$ {total_ped:.2f}")
             else: st.warning("Vazio")
-
-    # 2. BOTÃO EXCEL (NOVIDADE)
     with c2:
-        i_xls = st.session_state['df_compras_temp'].copy()
-        i_xls['Total'] = i_xls['Qtd'] * i_xls['Custo_Unit']
-        i_xls = i_xls[i_xls['Qtd']>0]
-        
+        i_xls = st.session_state['df_compras_temp'].copy(); i_xls['Total'] = i_xls['Qtd'] * i_xls['Custo_Unit']; i_xls = i_xls[i_xls['Qtd']>0]
         if not i_xls.empty:
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                i_xls[['Produto','Fornecedor','Qtd','Total']].to_excel(writer, index=False, sheet_name='Pedido')
-            
-            st.download_button(
-                label="📊 Baixar Pedido Excel",
-                data=buffer.getvalue(),
-                file_name="Pedido_Compra.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: i_xls[['Produto','Fornecedor','Qtd','Total']].to_excel(writer, index=False, sheet_name='Pedido')
+            st.download_button("📊 Baixar Pedido Excel", buffer.getvalue(), "Pedido_Compra.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 elif modo == "Estoque Central":
     if st.session_state['distribuicao_concluida']:
@@ -388,5 +361,19 @@ else:
     df_l = df_geral[df_geral['Loja'] == modo].copy()
     if not df_l.empty:
         renderizar_baixa_por_arquivo(df_geral, modo)
+        
+        # --- BOTÃO NOVO: BAIXAR ESTOQUE EXCEL ---
+        buffer_est = io.BytesIO()
+        with pd.ExcelWriter(buffer_est, engine='openpyxl') as writer:
+            df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']].to_excel(writer, index=False, sheet_name='Estoque')
+        
+        st.download_button(
+            label=f"📊 Baixar Estoque {modo} (.xlsx)",
+            data=buffer_est.getvalue(),
+            file_name=f"Estoque_{modo.replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        # ----------------------------------------
+        
         st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
     else: st.info("Vazio")
