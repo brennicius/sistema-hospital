@@ -5,7 +5,7 @@ from datetime import datetime
 from fpdf import FPDF
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Separado 30.0", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema Unificado 30.1", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 
 # --- 1. BANCO DE DADOS ---
@@ -34,14 +34,14 @@ def limpar_numero(valor):
     try: return float(s)
     except: return 0.0
 
-# --- 2. MENU SUPERIOR (7 BOTÕES) ---
+# --- 2. MENU SUPERIOR (6 BOTÕES) ---
 st.markdown("<h2 style='text-align: center; color: #2E86C1;'>Sistema de Gestão Hospitalar</h2>", unsafe_allow_html=True)
 st.markdown("---")
 
-if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Cafe"
+if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Produtos"
 
-# Agora temos 7 colunas
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+# 6 Colunas
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 def botao(col, txt, ico, nome_t):
     estilo = "primary" if st.session_state['tela_atual'] == nome_t else "secondary"
@@ -52,29 +52,28 @@ def botao(col, txt, ico, nome_t):
 botao(c1, "Estoque", "📦", "Estoque")
 botao(c2, "Transferir", "🚚", "Transferencia")
 botao(c3, "Compras", "🛒", "Compras")
-botao(c4, "Café", "☕", "Cafe")           # Menu Separado
-botao(c5, "Perecíveis", "🍎", "Pereciveis") # Menu Separado
-botao(c6, "Vendas", "📉", "Vendas")
-botao(c7, "Sugestões", "💡", "Sugestoes")
+botao(c4, "Produtos", "📋", "Produtos") # VOLTOU A SER UM SÓ
+botao(c5, "Vendas", "📉", "Vendas")
+botao(c6, "Sugestões", "💡", "Sugestoes")
 
 st.markdown("---")
 
-# --- 3. LÓGICA DE CADASTRO (REUTILIZÁVEL) ---
-def tela_cadastro_categoria(categoria_nome, titulo_emoji):
-    """
-    Esta função monta a tela de cadastro automaticamente
-    baseada na categoria que a gente passar (Café ou Perecível)
-    """
-    st.header(f"{titulo_emoji} Gestão de {categoria_nome}")
+# --- 3. TELA PRODUTOS (CADASTRO MESTRE) ---
+if st.session_state['tela_atual'] == "Produtos":
+    st.header("📋 Cadastro Geral de Produtos")
     
     df_db = carregar_dados()
     
     # --- ÁREA DE UPLOAD ---
-    with st.expander(f"📂 Cadastrar/Atualizar {categoria_nome} (Via Planilha)", expanded=True):
-        st.info(f"Suba a planilha aqui. Os produtos serão salvos automaticamente como '{categoria_nome}'.")
-        arquivo = st.file_uploader("Arquivo", type=["xlsx", "csv"], key=f"up_{categoria_nome}")
+    with st.expander("📂 Importar Planilha de Cadastro/Atualização", expanded=True):
+        st.info("Suba a planilha Mestre aqui. O sistema atualizará nomes, custos e mínimos.")
         
-        if arquivo and st.button("🚀 Processar Cadastro"):
+        # Seletor de Categoria para o Upload
+        c_upl, c_cat = st.columns([2, 1])
+        arquivo = c_upl.file_uploader("Arquivo Excel/CSV", type=["xlsx", "csv"])
+        categoria_escolhida = c_cat.selectbox("Definir categoria destes produtos como:", ["Café", "Perecíveis", "Geral"])
+        
+        if arquivo and c_upl.button("🚀 Processar Cadastro"):
             try:
                 if arquivo.name.endswith('.csv'): df_new = pd.read_csv(arquivo)
                 else: df_new = pd.read_excel(arquivo)
@@ -111,7 +110,7 @@ def tela_cadastro_categoria(categoria_nome, titulo_emoji):
                             "Codigo_Unico": str(r[c_cod_u]) if c_cod_u else "",
                             "Produto": prod,
                             "Produto_Alt": str(r[c_nome2]) if c_nome2 else "",
-                            "Categoria": categoria_nome, # FORÇA A CATEGORIA DO MENU
+                            "Categoria": categoria_escolhida, # Usa a categoria do seletor
                             "Fornecedor": str(r[c_forn]) if c_forn else "",
                             "Padrao": str(r[c_padr]) if c_padr else "",
                             "Custo": limpar_numero(r[c_cust]) if c_cust else 0.0,
@@ -122,12 +121,11 @@ def tela_cadastro_categoria(categoria_nome, titulo_emoji):
                         # Atualiza ou Cria
                         mask = (df_db['Produto'] == prod)
                         if mask.any():
-                            # Se já existe, atualiza os dados cadastrais (exceto estoque)
-                            # E GARANTE que a categoria mude para a atual se estiver errada
+                            # Se já existe, atualiza cadastro (mantém estoque)
                             for k, v in dados.items():
                                 df_db.loc[mask, k] = v
                         else:
-                            # Cria novo com estoques zerados
+                            # Cria novo
                             dados["Estoque_Central"] = 0
                             dados["Estoque_SA"] = 0
                             dados["Estoque_SI"] = 0
@@ -135,55 +133,48 @@ def tela_cadastro_categoria(categoria_nome, titulo_emoji):
                         cnt += 1
                         
                     salvar_banco(df_db)
-                    st.success(f"{cnt} itens processados em {categoria_nome}!")
+                    st.success(f"{cnt} itens processados como '{categoria_escolhida}'!")
                     st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
-    # --- TABELA DE VISUALIZAÇÃO ---
+    # --- VISUALIZAÇÃO POR ABAS ---
     st.divider()
-    st.markdown(f"**Base de Dados: {categoria_nome}**")
+    aba1, aba2, aba3 = st.tabs(["☕ Café", "🍎 Perecíveis", "📋 Todos"])
     
-    # Filtra só o que é da categoria atual
-    df_show = df_db[df_db['Categoria'] == categoria_nome].copy()
-    
-    if not df_show.empty:
-        # Mostra colunas úteis
-        cols_view = ["Codigo", "Produto", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI"]
-        st.dataframe(df_show[cols_view], use_container_width=True, hide_index=True)
-        
-        # Excluir
-        c_del1, c_del2 = st.columns([4, 1])
-        p_del = c_del1.selectbox("Excluir Item:", df_show['Produto'], key=f"del_{categoria_nome}", index=None)
-        if p_del and c_del2.button("🗑️ Apagar", key=f"btn_{categoria_nome}"):
-            df_db = df_db[df_db['Produto'] != p_del]
-            salvar_banco(df_db)
-            st.rerun()
-    else:
-        st.info(f"Nenhum produto cadastrado como {categoria_nome}.")
+    def mostrar_tabela(cat_filtro):
+        if cat_filtro == "Todos":
+            df_show = df_db
+        else:
+            df_show = df_db[df_db['Categoria'] == cat_filtro].copy()
+            
+        if not df_show.empty:
+            st.dataframe(df_show[["Codigo", "Produto", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI"]], use_container_width=True, hide_index=True)
+            
+            c_del1, c_del2 = st.columns([4, 1])
+            p_del = c_del1.selectbox(f"Excluir de {cat_filtro}:", df_show['Produto'], key=f"d_{cat_filtro}", index=None)
+            if p_del and c_del2.button("🗑️", key=f"b_{cat_filtro}"):
+                df_db_new = df_db[df_db['Produto'] != p_del]
+                salvar_banco(df_db_new)
+                st.rerun()
+        else:
+            st.info("Sem itens.")
 
+    with aba1: mostrar_tabela("Café")
+    with aba2: mostrar_tabela("Perecíveis")
+    with aba3: mostrar_tabela("Todos")
 
-# --- ROTEAMENTO DAS TELAS ---
-tela = st.session_state['tela_atual']
-
-if tela == "Estoque":
+# --- ROTEAMENTO DAS OUTRAS TELAS ---
+elif st.session_state['tela_atual'] == "Estoque":
     st.title("📦 Estoque"); st.info("Próxima etapa...")
 
-elif tela == "Transferencia":
+elif st.session_state['tela_atual'] == "Transferencia":
     st.title("🚚 Transferência"); st.info("Em breve...")
 
-elif tela == "Compras":
+elif st.session_state['tela_atual'] == "Compras":
     st.title("🛒 Compras"); st.info("Em breve...")
 
-# --- AQUI ESTÁ A MÁGICA: CHAMAMOS A MESMA FUNÇÃO MUDANDO O NOME ---
-elif tela == "Cafe":
-    tela_cadastro_categoria("Café", "☕")
-
-elif tela == "Pereciveis":
-    tela_cadastro_categoria("Perecíveis", "🍎")
-# ------------------------------------------------------------------
-
-elif tela == "Vendas":
+elif st.session_state['tela_atual'] == "Vendas":
     st.title("📉 Vendas"); st.info("Em breve...")
 
-elif tela == "Sugestoes":
+elif st.session_state['tela_atual'] == "Sugestoes":
     st.title("💡 Sugestões"); st.info("Em breve...")
