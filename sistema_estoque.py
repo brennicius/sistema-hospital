@@ -1,15 +1,19 @@
 import streamlit as st
 import pandas as pd
-import os
-from datetime import datetime
+import plotly.express as px
+from streamlit_gsheets import GSheetsConnection
+from datetime import datetime, timedelta
 from fpdf import FPDF
+import io
 
 # --- CONFIGURAÇÃO ---
-ARQUIVO_DADOS = 'estoque_completo.csv'
-ARQUIVO_LOG = 'historico_log.csv'
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-st.set_page_config(page_title="Sistema Gestão 27.0 (Final)", layout="wide")
+st.set_page_config(page_title="Sistema Nuvem ☁️", layout="wide")
+
+# --- CONEXÃO COM GOOGLE SHEETS ---
+# A conexão é criada uma vez e usada em todo o app
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- INICIALIZAÇÃO DE ESTADO ---
 def init_state():
@@ -22,21 +26,28 @@ def init_state():
 
 init_state()
 
-# --- FUNÇÕES DE DADOS ---
-@st.cache_data
-def carregar_dados_cache():
+# --- FUNÇÕES DE DADOS (AGORA COM SHEETS) ---
+def carregar_dados():
     colunas_padrao = ["Loja", "Produto", "Estoque_Atual", "Media_Vendas_Semana", "Ultima_Atualizacao", "Fornecedor", "Custo_Unit"]
-    if not os.path.exists(ARQUIVO_DADOS): return pd.DataFrame(columns=colunas_padrao)
-    try: df = pd.read_csv(ARQUIVO_DADOS)
-    except: return pd.DataFrame(columns=colunas_padrao)
     
+    # TTL=0 garante que ele sempre pegue o dado fresco da planilha, não do cache antigo
+    try:
+        df = conn.read(worksheet="Estoque", ttl=0)
+        # Se a planilha estiver vazia ou nova, cria a estrutura
+        if df.empty or len(df.columns) < 2:
+            return pd.DataFrame(columns=colunas_padrao)
+    except:
+        return pd.DataFrame(columns=colunas_padrao)
+    
+    # Tratamento de Nulos
     for col in ["Estoque_Atual", "Media_Vendas_Semana", "Custo_Unit"]:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        else: df[col] = 0
-            
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
     if "Fornecedor" not in df.columns: df["Fornecedor"] = "Geral"
     df["Fornecedor"] = df["Fornecedor"].fillna("Geral").astype(str)
     
+    # Agrupamento para segurança
     if not df.empty:
         df = df.groupby(['Loja', 'Produto', 'Fornecedor', 'Ultima_Atualizacao'], as_index=False).agg({
             'Estoque_Atual': 'sum', 'Media_Vendas_Semana': 'max', 'Custo_Unit': 'max'
@@ -44,17 +55,52 @@ def carregar_dados_cache():
     return df
 
 def salvar_dados(df):
-    df.to_csv(ARQUIVO_DADOS, index=False)
-    carregar_dados_cache.clear()
+    # Salva na aba "Estoque" da planilha conectada
+    conn.update(worksheet="Estoque", data=df)
+    st.cache_data.clear() # Limpa cache interno do Streamlit
+
+def carregar_log():
+    try:
+        df = conn.read(worksheet="Historico", ttl=0)
+        if df.empty: return pd.DataFrame(columns=["Data", "Produto", "Quantidade", "Tipo", "Detalhe", "Usuario"])
+        return df
+    except:
+        return pd.DataFrame(columns=["Data", "Produto", "Quantidade", "Tipo", "Detalhe", "Usuario"])
 
 def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
-    novo_log = {"Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Produto": produto, "Quantidade": quantidade, "Tipo": tipo, "Detalhe": origem_destino, "Usuario": usuario}
-    if not os.path.exists(ARQUIVO_LOG): df_log = pd.DataFrame(columns=["Data", "Produto", "Quantidade", "Tipo", "Detalhe", "Usuario"])
-    else: df_log = pd.read_csv(ARQUIVO_LOG)
-    df_log = pd.concat([df_log, pd.DataFrame([novo_log])], ignore_index=True)
-    df_log.to_csv(ARQUIVO_LOG, index=False)
+    novo_log = pd.DataFrame([{
+        "Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Produto": produto,
+        "Quantidade": quantidade,
+        "Tipo": tipo,
+        "Detalhe": origem_destino,
+        "Usuario": usuario
+    }])
+    
+    df_antigo = carregar_log()
+    df_novo = pd.concat([df_antigo, novo_log], ignore_index=True)
+    conn.update(worksheet="Historico", data=df_novo)
 
-# --- PDF ---
+# --- FUNÇÕES AUXILIARES (IGUAIS AO ANTERIOR) ---
+def calcular_kpis_avancados(df):
+    df['Venda_Diaria'] = df['Media_Vendas_Semana'] / 7
+    df['Dias_Cobertura'] = df.apply(lambda x: x['Estoque_Atual'] / x['Venda_Diaria'] if x['Venda_Diaria'] > 0 else 999, axis=1)
+    df['Valor_Total'] = df['Estoque_Atual'] * df['Custo_Unit']
+    df = df.sort_values('Valor_Total', ascending=False)
+    total = df['Valor_Total'].sum()
+    if total > 0:
+        df['Acumulado'] = df['Valor_Total'].cumsum()
+        df['Perc'] = df['Acumulado'] / total
+        df['Classe_ABC'] = df['Perc'].apply(lambda x: "A" if x<=0.8 else "B" if x<=0.95 else "C")
+    else: df['Classe_ABC'] = "C"
+    return df
+
+def status_cobertura(dias):
+    if dias <= 3: return "🔴 Crítico"
+    elif dias <= 7: return "🟠 Baixo"
+    elif dias <= 30: return "🟢 Saudável"
+    else: return "🔵 Excesso"
+
 def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
     pdf = FPDF()
     pdf.add_page()
@@ -65,9 +111,9 @@ def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
     pdf.ln(5)
     cols = dataframe.columns.tolist()
     if not colunas_largura:
-        largura_base = 190 // len(cols)
-        larguras = [largura_base] * len(cols)
-        if "Produto" in cols: idx = cols.index("Produto"); larguras[idx] = 80 
+        l = 190 // len(cols)
+        larguras = [l] * len(cols)
+        if "Produto" in cols: larguras[cols.index("Produto")] = 80
     else: larguras = colunas_largura
     pdf.set_font("Arial", 'B', 9)
     for i, col in enumerate(cols): pdf.cell(larguras[i], 10, col[:15], 1, 0, 'C')
@@ -75,10 +121,9 @@ def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
     pdf.set_font("Arial", size=9)
     for index, row in dataframe.iterrows():
         for i, col in enumerate(cols):
-            valor = str(row[col])
-            texto = valor.encode('latin-1', 'replace').decode('latin-1')
-            align = 'L' if i == 0 else 'C'
-            pdf.cell(larguras[i], 10, texto[:45], 1, 0, align)
+            txt = str(row[col]).encode('latin-1', 'replace').decode('latin-1')
+            align = 'L' if i==0 else 'C'
+            pdf.cell(larguras[i], 10, txt[:45], 1, 0, align)
         pdf.ln()
     return pdf.output(dest='S').encode('latin-1')
 
@@ -91,67 +136,31 @@ def limpar_selecao(): st.session_state['selecao_exclusao'] = []
 def selecionar_tudo_loja(): 
     if 'df_loja_atual' in st.session_state: st.session_state['selecao_exclusao'] = st.session_state['df_loja_atual']['Produto'].tolist()
 
-# --- FUNÇÃO ESPECIAL: BAIXA POR ARQUIVO ---
-def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
-    st.markdown("---")
-    with st.expander("📉 Baixar Vendas do Dia (Upload Relatório)", expanded=True):
-        st.info("Suba o relatório de vendas. O sistema vai pedir para você confirmar as colunas.")
-        
-        arquivo_vendas = st.file_uploader("Relatório de Vendas (Excel/CSV)", type=['csv', 'xlsx'], key="up_vendas")
-        
-        if arquivo_vendas:
-            try:
-                if arquivo_vendas.name.endswith('.csv'): df_vendas = pd.read_csv(arquivo_vendas)
-                else: df_vendas = pd.read_excel(arquivo_vendas)
-                
-                st.write("Configuração das Colunas:")
-                col1, col2 = st.columns(2)
-                
-                # Tenta adivinhar as colunas
-                cols = df_vendas.columns.tolist()
-                idx_nome = next((i for i, c in enumerate(cols) if "nome" in c.lower() or "prod" in c.lower() or "desc" in c.lower()), 0)
-                idx_qtd = next((i for i, c in enumerate(cols) if "qtd" in c.lower() or "quant" in c.lower()), 0)
-                
-                col_nome = col1.selectbox("Coluna do Produto:", cols, index=idx_nome)
-                col_qtd = col2.selectbox("Coluna da Quantidade:", cols, index=idx_qtd)
-                
-                if st.button("🚀 Processar Baixa"):
-                    log_sucesso = 0
-                    log_erro = []
-                    
-                    for index, row in df_vendas.iterrows():
-                        p_nome = str(row[col_nome]).strip()
-                        try: q_venda = float(row[col_qtd])
-                        except: q_venda = 0
-                        
-                        if q_venda > 0:
-                            # Busca e Abate
-                            mask = (df_geral['Loja'] == loja_selecionada) & (df_geral['Produto'] == p_nome)
-                            if mask.any():
-                                atual = df_geral.loc[mask, 'Estoque_Atual'].values[0]
-                                novo = max(0, atual - q_venda)
-                                df_geral.loc[mask, 'Estoque_Atual'] = novo
-                                log_sucesso += 1
-                            else:
-                                log_erro.append(f"{p_nome} (Qtd: {q_venda})")
-                    
-                    if log_sucesso > 0:
-                        df_geral.loc[df_geral['Loja'] == loja_selecionada, 'Ultima_Atualizacao'] = datetime.now().strftime("%d/%m %H:%M")
-                        salvar_dados(df_geral)
-                        registrar_log("Vários", log_sucesso, "Venda", f"Arquivo em {loja_selecionada}")
-                        st.success(f"✅ Baixa realizada em {log_sucesso} itens!")
-                        if log_erro:
-                            with st.expander("⚠️ Itens não encontrados no estoque:"):
-                                st.write(log_erro)
-                        st.rerun()
-                    else:
-                        st.warning("Nenhum item processado. Verifique os nomes dos produtos.")
-                        
-            except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
+def calcular_cmv_mensal():
+    df_log = carregar_log()
+    df_est = carregar_dados()
+    if df_log.empty or df_est.empty: return pd.DataFrame()
+    df_c = df_log[df_log['Tipo'].isin(['Baixa', 'Venda'])].copy()
+    if df_c.empty: return pd.DataFrame()
+    mapa = df_est.groupby('Produto')['Custo_Unit'].max()
+    df_c['Custo'] = df_c['Produto'].map(mapa).fillna(0)
+    df_c['Total'] = df_c['Quantidade'] * df_c['Custo']
+    def id_loja(x):
+        x=str(x).lower()
+        if "amaro" in x: return "Sto Amaro"
+        if "izabel" in x: return "Sta Izabel"
+        if "central" in x: return "Central"
+        return "Outros"
+    df_c['Loja'] = df_c['Detalhe'].apply(id_loja)
+    return df_c.groupby('Loja')['Total'].sum().reset_index()
 
 # --- INTERFACE ---
-st.title("🚀 Sistema de Gestão 27.0")
-df_geral = carregar_dados_cache()
+st.title("☁️ Sistema Integrado Google Sheets")
+try:
+    df_geral = carregar_dados()
+except Exception as e:
+    st.error("Erro ao conectar no Google Sheets. Verifique o arquivo secrets.toml")
+    st.stop()
 
 # BARRA LATERAL
 with st.sidebar:
@@ -159,211 +168,223 @@ with st.sidebar:
     modo = st.radio("Ir para:", UNIDADES)
     st.divider()
     
-    # 1. UPLOAD DE ESTOQUE
+    # UPLOAD
     if modo in ["Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel"]:
-        with st.expander("📦 Upload de Estoque (Qtd)"):
-            arquivo = st.file_uploader("Planilha Estoque", type=['csv', 'xlsx'], key="up_estoque")
+        with st.expander("📦 Upload Estoque"):
+            arquivo = st.file_uploader("Planilha", type=['csv', 'xlsx'], key="up_est")
             if arquivo:
                 try:
-                    df_raw = pd.read_csv(arquivo) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo)
+                    df_r = pd.read_csv(arquivo) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo)
                     mapa = {}
-                    for col in df_raw.columns:
-                        c = col.lower()
-                        if "prod" in c or "nome" in c: mapa[col] = "Produto"
-                        elif "estoq" in c or "qtd" in c: mapa[col] = "Estoque_Atual"
-                        if modo != "Estoque Central" and ("med" in c or "méd" in c): mapa[col] = "Media_Vendas_Semana"
-                    df_proc = df_raw.rename(columns=mapa)
-                    if "Produto" in df_proc.columns:
-                        if "Estoque_Atual" not in df_proc.columns: df_proc["Estoque_Atual"] = 0
-                        if "Media_Vendas_Semana" not in df_proc.columns: df_proc["Media_Vendas_Semana"] = 0
-                        df_proc["Loja"] = modo
-                        df_proc["Ultima_Atualizacao"] = datetime.now().strftime("%d/%m %H:%M")
+                    for c in df_r.columns:
+                        cl = c.lower()
+                        if "prod" in cl: mapa[c] = "Produto"
+                        elif "est" in cl or "qtd" in cl: mapa[c] = "Estoque_Atual"
+                        elif "med" in cl: mapa[c] = "Media_Vendas_Semana"
+                    df_p = df_r.rename(columns=mapa)
+                    
+                    if "Produto" in df_p.columns:
+                        if "Estoque_Atual" not in df_p.columns: df_p["Estoque_Atual"] = 0
+                        if "Media_Vendas_Semana" not in df_p.columns: df_p["Media_Vendas_Semana"] = 0
+                        df_p["Loja"] = modo
+                        df_p["Ultima_Atualizacao"] = datetime.now().strftime("%d/%m %H:%M")
                         
-                        df_antiga = df_geral[df_geral['Loja'] == modo].set_index('Produto')
-                        df_antiga = df_antiga[~df_antiga.index.duplicated(keep='first')]
+                        df_ant = df_geral[df_geral['Loja'] == modo].set_index('Produto')
+                        df_ant = df_ant[~df_ant.index.duplicated(keep='first')]
+                        df_p = df_p.set_index('Produto')
                         
-                        df_proc = df_proc.set_index('Produto')
-                        if not df_antiga.empty:
-                            df_proc['Fornecedor'] = df_proc.index.map(df_antiga['Fornecedor']).fillna("Geral")
-                            df_proc['Custo_Unit'] = df_proc.index.map(df_antiga['Custo_Unit']).fillna(0)
+                        if not df_ant.empty:
+                            df_p['Fornecedor'] = df_p.index.map(df_ant['Fornecedor']).fillna("Geral")
+                            df_p['Custo_Unit'] = df_p.index.map(df_ant['Custo_Unit']).fillna(0)
                         else:
-                            df_proc['Fornecedor'] = "Geral"; df_proc['Custo_Unit'] = 0
-                        
-                        df_outras = df_geral[df_geral['Loja'] != modo]
-                        df_final = pd.concat([df_outras, df_proc.reset_index()], ignore_index=True)
-                        salvar_dados(df_final); resetar_processos(); st.success("Estoque Atualizado!"); st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
+                            df_p['Fornecedor'] = "Geral"; df_p['Custo_Unit'] = 0
+                            
+                        df_out = df_geral[df_geral['Loja'] != modo]
+                        df_fin = pd.concat([df_out, df_p.reset_index()], ignore_index=True)
+                        salvar_dados(df_fin); resetar_processos(); st.success("Salvo na Nuvem!"); st.rerun()
+                except: st.error("Erro no arquivo")
 
-    # 2. ATUALIZAR PREÇOS
-    st.markdown("---")
-    with st.expander("💲 Atualizar Tabela de Preços"):
-        arq_preco = st.file_uploader("Planilha Preços/Forn", type=['csv', 'xlsx'], key="up_preco")
-        if arq_preco and st.button("Confirmar Preços"):
+    with st.expander("💲 Atualizar Preços"):
+        arq_p = st.file_uploader("Preços", type=['csv', 'xlsx'], key="up_pr")
+        if arq_p and st.button("Salvar Preços"):
             try:
-                df_p = pd.read_csv(arq_preco) if arq_preco.name.endswith('.csv') else pd.read_excel(arq_preco)
-                mapa_p = {}
-                for col in df_p.columns:
-                    c = col.lower()
-                    if "prod" in c: mapa_p[col] = "Produto"
-                    elif "forn" in c: mapa_p[col] = "Fornecedor"
-                    elif "cust" in c or "pre" in c: mapa_p[col] = "Custo_Unit"
-                
-                df_p = df_p.rename(columns=mapa_p)
-                df_p = df_p.drop_duplicates(subset=['Produto'], keep='first')
-                df_p = df_p.set_index('Produto')
-                
+                df_p = pd.read_csv(arq_p) if arq_p.name.endswith('.csv') else pd.read_excel(arq_p)
+                mapa = {}
+                for c in df_p.columns:
+                    cl = c.lower()
+                    if "prod" in cl: mapa[c] = "Produto"
+                    elif "forn" in cl: mapa[c] = "Fornecedor"
+                    elif "cust" in cl or "pre" in cl: mapa[c] = "Custo_Unit"
+                df_p = df_p.rename(columns=mapa).drop_duplicates('Produto').set_index('Produto')
                 df_g = df_geral.set_index('Produto')
                 if "Fornecedor" in df_p.columns: df_g.update(df_p[['Fornecedor']])
                 if "Custo_Unit" in df_p.columns: df_g.update(df_p[['Custo_Unit']])
-                
-                salvar_dados(df_g.reset_index()); st.success("Preços Atualizados!"); st.rerun()
-            except Exception as e: st.error(f"Erro: {e}")
+                salvar_dados(df_g.reset_index()); st.success("Atualizado!"); st.rerun()
+            except: st.error("Erro")
 
-    st.markdown("---")
-    with st.expander("🗑️ Excluir Itens"):
+    with st.expander("🗑️ Lixeira"):
         df_loja = df_geral[df_geral['Loja'] == modo]
         st.session_state['df_loja_atual'] = df_loja
         c1, c2 = st.columns(2)
         c1.button("Tudo", on_click=selecionar_tudo_loja)
         c2.button("Limpar", on_click=limpar_selecao)
-        itens_apagar = st.multiselect("Selecionar:", df_loja['Produto'].unique(), key='selecao_exclusao')
-        if st.button("❌ Excluir"):
-            if itens_apagar:
-                mask = ~((df_geral['Loja'] == modo) & (df_geral['Produto'].isin(itens_apagar)))
-                df_geral = df_geral[mask]; salvar_dados(df_geral); resetar_processos(); st.success("Excluído!"); st.rerun()
+        itens = st.multiselect("Apagar:", df_loja['Produto'].unique(), key='selecao_exclusao')
+        if st.button("❌ Apagar"):
+            mask = ~((df_geral['Loja'] == modo) & (df_geral['Produto'].isin(itens)))
+            salvar_dados(df_geral[mask]); resetar_processos(); st.success("Apagado!"); st.rerun()
 
 # --- PÁGINAS ---
-
 if modo == "📊 Dashboard":
-    st.subheader("Visão Geral")
-    df_calc = df_geral.copy()
-    df_calc['Valor_Total'] = df_calc['Estoque_Atual'] * df_calc['Custo_Unit']
+    st.subheader("Visão Financeira (Nuvem)")
+    df_c = df_geral.copy()
+    df_c['Valor'] = df_c['Estoque_Atual'] * df_c['Custo_Unit']
     k1, k2, k3 = st.columns(3)
-    k1.metric("💰 Valor Estoque", f"R$ {df_calc['Valor_Total'].sum():,.2f}")
-    k2.metric("📦 Volume Total", f"{df_calc['Estoque_Atual'].sum():,.0f}")
-    k3.metric("🔻 Zerados", len(df_calc[df_calc['Estoque_Atual'] <= 0]))
-    st.bar_chart(df_calc.groupby('Produto')['Valor_Total'].sum().sort_values(ascending=False).head(10))
+    k1.metric("Valor Total", f"R$ {df_c['Valor'].sum():,.2f}")
+    k2.metric("Itens", f"{df_c['Estoque_Atual'].sum():,.0f}")
+    k3.metric("Zerados", len(df_c[df_c['Estoque_Atual'] <= 0]))
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 🔥 Consumo Mensal (CMV)")
+        df_cmv = calcular_cmv_mensal()
+        if not df_cmv.empty: st.bar_chart(df_cmv.set_index('Loja'))
+        else: st.info("Sem dados de consumo ainda.")
+    with c2:
+        st.markdown("### 🏆 Top Valor")
+        st.bar_chart(df_c.groupby('Produto')['Valor'].sum().sort_values(ascending=False).head(10))
 
 elif modo == "📜 Histórico":
-    st.subheader("Extrato")
-    if os.path.exists(ARQUIVO_LOG): st.dataframe(pd.read_csv(ARQUIVO_LOG).sort_values("Data", ascending=False), use_container_width=True)
-    else: st.info("Sem registros.")
+    st.subheader("Log de Operações (Sheets)")
+    st.dataframe(carregar_log().sort_values('Data', ascending=False), use_container_width=True)
 
 elif modo == "🛒 Compras":
-    st.subheader("🛒 Setor de Compras")
+    st.subheader("Compras")
     if st.session_state['df_compras_temp'] is None:
         df_base = df_geral[df_geral['Loja'] == "Estoque Central"][['Produto', 'Fornecedor', 'Custo_Unit']].copy()
-        df_base = df_base.drop_duplicates(subset=['Produto']).sort_values('Produto')
-        df_base['Qtd Pedido'] = 0
+        df_base = df_base.drop_duplicates('Produto').sort_values('Produto')
+        df_base['Qtd'] = 0
         st.session_state['df_compras_temp'] = df_base
-
-    df_view = st.session_state['df_compras_temp']
-    col_f, _ = st.columns([2, 1])
-    f_list = sorted([str(x) for x in df_view['Fornecedor'].unique().tolist()])
-    lista_forn = ["Todos"] + f_list
-    forn_filtro = col_f.selectbox("Filtrar Fornecedor", lista_forn)
     
-    df_edit = df_view[df_view['Fornecedor'] == forn_filtro].copy() if forn_filtro != "Todos" else df_view.copy()
-    df_edit['Total'] = df_edit['Qtd Pedido'] * df_edit['Custo_Unit']
+    df_v = st.session_state['df_compras_temp']
+    f_list = ["Todos"] + sorted(df_v['Fornecedor'].unique().tolist())
+    sel_f = st.selectbox("Fornecedor", f_list)
+    df_e = df_v[df_v['Fornecedor'] == sel_f].copy() if sel_f != "Todos" else df_v.copy()
+    df_e['Total'] = df_e['Qtd'] * df_e['Custo_Unit']
     
-    edited = st.data_editor(df_edit, column_config={"Produto": st.column_config.TextColumn(disabled=True), "Fornecedor": st.column_config.TextColumn(disabled=True), "Custo_Unit": st.column_config.NumberColumn("Preço", format="R$ %.2f", disabled=True), "Total": st.column_config.NumberColumn("Total", format="R$ %.2f", disabled=True)}, use_container_width=True, height=500)
+    ed = st.data_editor(df_e, column_config={"Qtd": st.column_config.NumberColumn(min_value=0), "Custo_Unit": st.column_config.NumberColumn(format="R$ %.2f", disabled=True), "Total": st.column_config.NumberColumn(format="R$ %.2f", disabled=True)}, use_container_width=True, height=500)
     
-    if not edited.equals(df_edit):
-        df_view.set_index('Produto', inplace=True); edited.set_index('Produto', inplace=True)
-        df_view.update(edited); df_view.reset_index(inplace=True)
-        st.session_state['df_compras_temp'] = df_view; st.rerun()
-
-    st.divider()
-    st.metric("Total do Pedido", f"R$ {edited['Total'].sum():,.2f}")
-    if st.button("🖨️ Gerar Pedido PDF", type="primary"):
-        itens = st.session_state['df_compras_temp']; itens = itens[itens['Qtd Pedido'] > 0]
-        if not itens.empty:
-            pdf = criar_pdf_generico(itens[['Produto', 'Fornecedor', 'Qtd Pedido', 'Total']], "PEDIDO DE COMPRA", [90, 50, 25, 30])
-            st.download_button("Baixar PDF", pdf, "Pedido.pdf", "application/pdf")
-            registrar_log("Vários", len(itens), "Compra", f"Total R$ {edited['Total'].sum():.2f}")
-        else: st.warning("Vazio.")
+    if not ed.equals(df_e):
+        df_v.set_index('Produto', inplace=True); ed.set_index('Produto', inplace=True)
+        df_v.update(ed); df_v.reset_index(inplace=True)
+        st.session_state['df_compras_temp'] = df_v; st.rerun()
+        
+    st.metric("Total", f"R$ {ed['Total'].sum():,.2f}")
+    if st.button("Baixar Pedido"):
+        i = st.session_state['df_compras_temp']
+        i = i[i['Qtd'] > 0]
+        if not i.empty:
+            pdf = criar_pdf_generico(i[['Produto', 'Fornecedor', 'Qtd', 'Total']], "PEDIDO", [90, 50, 20, 30])
+            st.download_button("PDF", pdf, "Ped.pdf", "application/pdf")
+            registrar_log("Vários", len(i), "Compra", f"R$ {ed['Total'].sum():.2f}")
 
 elif modo == "Estoque Central":
     if st.session_state['distribuicao_concluida']:
-        st.subheader("✅ Sucesso!"); st.success("Estoque atualizado.")
-        if st.session_state.get('romaneio_pdf_cache'): st.download_button("📄 Baixar Romaneio", st.session_state['romaneio_pdf_cache'], "Romaneio.pdf", "application/pdf")
-        if st.session_state['romaneio_final'] is not None: st.dataframe(st.session_state['romaneio_final'], use_container_width=True)
-        if st.button("🔙 Voltar"): resetar_processos(); st.rerun()
+        st.success("Sucesso!")
+        if st.session_state.get('romaneio_pdf_cache'): st.download_button("Baixar Romaneio", st.session_state['romaneio_pdf_cache'], "Rom.pdf", "application/pdf")
+        if st.button("Voltar"): resetar_processos(); st.rerun()
     else:
-        st.subheader("Distribuição Logística")
-        with st.expander("📝 Ajuste Manual"):
-            f_prod = st.selectbox("Produto", df_geral[df_geral['Loja'] == modo]['Produto'].unique())
-            c1, c2, c3 = st.columns(3)
-            op = c1.radio("Ação", ["➕ Entrada", "➖ Baixa"])
-            qtd = c2.number_input("Qtd", 1.0)
-            if c3.button("Confirmar"):
-                idx = df_geral[(df_geral['Loja'] == modo) & (df_geral['Produto'] == f_prod)].index
+        st.subheader("Distribuição")
+        with st.expander("Ajuste Manual"):
+            p = st.selectbox("Prod", df_geral[df_geral['Loja']==modo]['Produto'].unique())
+            q = st.number_input("Qtd", 1.0)
+            c1, c2 = st.columns(2)
+            if c1.button("Entrada"):
+                idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
+                df_geral.loc[idx, 'Estoque_Atual'] += q
+                salvar_dados(df_geral); registrar_log(p, q, "Entrada", "Manual"); st.success("Ok"); st.rerun()
+            if c2.button("Baixa"):
+                idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
                 cur = df_geral.loc[idx, 'Estoque_Atual'].values[0]
-                if "➕" in op: df_geral.loc[idx, 'Estoque_Atual'] += qtd
-                else: df_geral.loc[idx, 'Estoque_Atual'] = max(0, cur - qtd)
-                salvar_dados(df_geral); registrar_log(f_prod, qtd, "Manual", "Central"); st.rerun()
-
-        st.divider()
-        search = st.text_input("🔍 Buscar (Nome/Código)", placeholder="Digite...")
+                df_geral.loc[idx, 'Estoque_Atual'] = max(0, cur-q)
+                salvar_dados(df_geral); registrar_log(p, q, "Baixa", "Manual"); st.success("Ok"); st.rerun()
         
+        search = st.text_input("Buscar", placeholder="Nome...")
         if st.session_state['df_distribuicao_temp'] is None:
-            df_base = df_geral[df_geral['Loja'] == modo][['Produto', 'Estoque_Atual']].copy()
-            df_base['Enviar SA'] = 0; df_base['Enviar SI'] = 0
-            for loja, sigla in [("Hosp. Santo Amaro", "SA"), ("Hosp. Santa Izabel", "SI")]:
-                df_h = df_geral[df_geral['Loja'] == loja].set_index('Produto')
+            df_b = df_geral[df_geral['Loja']==modo][['Produto','Estoque_Atual']].copy()
+            df_b['Env SA'] = 0; df_b['Env SI'] = 0
+            for l, s in [("Hosp. Santo Amaro","SA"), ("Hosp. Santa Izabel","SI")]:
+                df_h = df_geral[df_geral['Loja']==l].set_index('Produto')
                 df_h = df_h[~df_h.index.duplicated(keep='first')]
-                df_base[f'Tem {sigla}'] = df_base['Produto'].map(df_h['Estoque_Atual']).fillna(0)
-                df_base[f'Media {sigla}'] = df_base['Produto'].map(df_h['Media_Vendas_Semana']).fillna(0)
-            st.session_state['df_distribuicao_temp'] = df_base
-
-        df_work = st.session_state['df_distribuicao_temp']
-        if search: df_view = df_work[df_work['Produto'].str.contains(search, case=False, na=False)].copy()
-        else: df_view = df_work.sort_values('Estoque_Atual', ascending=False).head(50).copy(); st.caption("Mostrando top 50.")
-
-        df_view['Saldo'] = df_view['Estoque_Atual'] - df_view['Enviar SA'] - df_view['Enviar SI']
-        cols = ['Produto', 'Estoque_Atual', 'Saldo', 'Tem SA', 'Media SA', 'Enviar SA', 'Tem SI', 'Media SI', 'Enviar SI']
-        
-        edited = st.data_editor(df_view[cols], column_config={"Estoque_Atual": st.column_config.NumberColumn("Central", disabled=True), "Saldo": st.column_config.NumberColumn("Restante", disabled=True), "Tem SA": st.column_config.NumberColumn("🏠 Tem SA", disabled=True, format="%.0f"), "Media SA": st.column_config.NumberColumn("📈 Méd SA", disabled=True, format="%.1f"), "Tem SI": st.column_config.NumberColumn("🏠 Tem SI", disabled=True, format="%.0f"), "Media SI": st.column_config.NumberColumn("📈 Méd SI", disabled=True, format="%.1f")}, use_container_width=True, height=500)
-        
-        if not edited.equals(df_view[cols]):
-            edited.set_index('Produto', inplace=True); df_work.set_index('Produto', inplace=True)
-            df_work.update(edited[['Enviar SA', 'Enviar SI']]); df_work.reset_index(inplace=True)
-            st.session_state['df_distribuicao_temp'] = df_work; st.rerun()
+                df_b[f'Tem {s}'] = df_b['Produto'].map(df_h['Estoque_Atual']).fillna(0)
+                df_b[f'Med {s}'] = df_b['Produto'].map(df_h['Media_Vendas_Semana']).fillna(0)
+            st.session_state['df_distribuicao_temp'] = df_b
             
-        st.divider()
-        if st.button("✅ Efetivar Distribuição", type="primary"):
-            final = st.session_state['df_distribuicao_temp']
+        df_w = st.session_state['df_distribuicao_temp']
+        df_view = df_w[df_w['Produto'].str.contains(search, case=False, na=False)].copy() if search else df_w.sort_values('Estoque_Atual', ascending=False).head(50).copy()
+        
+        df_view['Saldo'] = df_view['Estoque_Atual'] - df_view['Env SA'] - df_view['Env SI']
+        cols = ['Produto', 'Estoque_Atual', 'Saldo', 'Tem SA', 'Med SA', 'Env SA', 'Tem SI', 'Med SI', 'Env SI']
+        
+        ed = st.data_editor(df_view[cols], column_config={"Estoque_Atual": st.column_config.NumberColumn(disabled=True), "Saldo": st.column_config.NumberColumn(disabled=True), "Tem SA": st.column_config.NumberColumn(disabled=True), "Med SA": st.column_config.NumberColumn(disabled=True), "Tem SI": st.column_config.NumberColumn(disabled=True), "Med SI": st.column_config.NumberColumn(disabled=True)}, use_container_width=True, height=500)
+        
+        if not ed.equals(df_view[cols]):
+            ed.set_index('Produto', inplace=True); df_w.set_index('Produto', inplace=True)
+            df_w.update(ed[['Env SA', 'Env SI']]); df_w.reset_index(inplace=True)
+            st.session_state['df_distribuicao_temp'] = df_w; st.rerun()
+            
+        if st.button("Efetivar"):
+            fin = st.session_state['df_distribuicao_temp']
             rom = []
-            for i, r in final.iterrows():
-                sa, si = r['Enviar SA'], r['Enviar SI']
-                if sa > 0 or si > 0:
-                    idx_c = df_geral[(df_geral['Loja'] == modo) & (df_geral['Produto'] == r['Produto'])].index
-                    df_geral.loc[idx_c, 'Estoque_Atual'] -= (sa + si)
-                    for loja, qtd, sigla in [("Hosp. Santo Amaro", sa, "SA"), ("Hosp. Santa Izabel", si, "SI")]:
-                        if qtd > 0:
-                            idx_l = (df_geral['Loja'] == loja) & (df_geral['Produto'] == r['Produto'])
-                            if idx_l.any(): df_geral.loc[idx_l, 'Estoque_Atual'] += qtd
-                            else:
-                                novo = df_geral.loc[idx_c].iloc[0].copy(); novo['Loja'] = loja; novo['Estoque_Atual'] = qtd
-                                novo['Media_Vendas_Semana'] = r.get(f'Media {sigla}', 0)
-                                df_geral = pd.concat([df_geral, pd.DataFrame([novo])], ignore_index=True)
-                    rom.append({"Produto": r['Produto'], "Enviar SA": sa, "Enviar SI": si})
-                    registrar_log(r['Produto'], sa+si, "Transf", f"SA:{sa} SI:{si}")
-            
-            salvar_dados(df_geral)
-            if rom:
-                df_rom = pd.DataFrame(rom)
-                pdf = criar_pdf_generico(df_rom, "ROMANEIO", [90, 50, 50])
-                st.session_state['romaneio_final'] = df_rom; st.session_state['romaneio_pdf_cache'] = pdf
-                st.session_state['distribuicao_concluida'] = True; st.session_state['df_distribuicao_temp'] = None
+            env = fin[(fin['Env SA']>0)|(fin['Env SI']>0)]
+            if env.empty: st.warning("Nada")
+            else:
+                for i, r in env.iterrows():
+                    sa, si, p = r['Env SA'], r['Env SI'], r['Produto']
+                    idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
+                    if not idx.empty:
+                        df_geral.loc[idx, 'Estoque_Atual'] -= (sa+si)
+                        for l, q, s in [("Hosp. Santo Amaro", sa, "SA"), ("Hosp. Santa Izabel", si, "SI")]:
+                            if q>0:
+                                idl = (df_geral['Loja']==l)&(df_geral['Produto']==p)
+                                if idl.any(): df_geral.loc[idl, 'Estoque_Atual'] += q
+                                else:
+                                    n = df_geral.loc[idx].iloc[0].copy(); n['Loja']=l; n['Estoque_Atual']=q; n['Media_Vendas_Semana']=r.get(f'Med {s}',0)
+                                    df_geral = pd.concat([df_geral, pd.DataFrame([n])], ignore_index=True)
+                        rom.append({"Produto":p, "Env SA":sa, "Env SI":si})
+                        registrar_log(p, sa+si, "Transferência", f"SA:{sa} SI:{si}")
+                salvar_dados(df_geral)
+                pdf = criar_pdf_generico(pd.DataFrame(rom), "ROMANEIO")
+                st.session_state['romaneio_pdf_cache'] = pdf
+                st.session_state['distribuicao_concluida'] = True
+                st.session_state['df_distribuicao_temp'] = None
                 st.rerun()
 
 else:
     st.subheader(f"Gestão: {modo}")
     df_l = df_geral[df_geral['Loja'] == modo].copy()
     if not df_l.empty:
-        # AQUI ESTÁ A FUNÇÃO NOVA DE BAIXA POR ARQUIVO
-        renderizar_baixa_por_arquivo(df_geral, modo)
-        
-        st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
-    else: st.info("Vazio.")
+        with st.expander("📉 Baixa por Arquivo"):
+            upl = st.file_uploader("Arquivo", key="vendas")
+            if upl:
+                try:
+                    df_v = pd.read_csv(upl) if upl.name.endswith('.csv') else pd.read_excel(upl)
+                    cols = df_v.columns.tolist()
+                    c1, c2 = st.columns(2)
+                    idx_n = next((i for i, c in enumerate(cols) if "nome" in c.lower() or "prod" in c.lower()), 0)
+                    idx_q = next((i for i, c in enumerate(cols) if "qtd" in c.lower()), 0)
+                    cn = c1.selectbox("Nome", cols, index=idx_n)
+                    cq = c2.selectbox("Qtd", cols, index=idx_q)
+                    if st.button("Processar"):
+                        cnt = 0
+                        for i, r in df_v.iterrows():
+                            p = str(r[cn]).strip()
+                            q = float(r[cq]) if pd.notnull(r[cq]) else 0
+                            if q>0:
+                                m = (df_geral['Loja']==modo)&(df_geral['Produto']==p)
+                                if m.any():
+                                    df_geral.loc[m, 'Estoque_Atual'] = max(0, df_geral.loc[m, 'Estoque_Atual'].values[0]-q)
+                                    cnt+=1
+                        if cnt>0: salvar_dados(df_geral); registrar_log("Vários", cnt, "Venda", modo); st.success(f"{cnt} baixados!"); st.rerun()
+                except: st.error("Erro arquivo")
+        st.dataframe(df_l[['Produto','Estoque_Atual','Media_Vendas_Semana']], use_container_width=True)
+    else: st.info("Vazio")
