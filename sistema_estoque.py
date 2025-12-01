@@ -6,7 +6,7 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Gestão 35.0 (Excel + Remoção)", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema Gestão 36.0 (Reset)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 ARQUIVO_LOG = "historico_log.csv"
 
@@ -14,9 +14,8 @@ ARQUIVO_LOG = "historico_log.csv"
 def init_state():
     if 'romaneio_pdf' not in st.session_state: st.session_state['romaneio_pdf'] = None
     if 'romaneio_xlsx' not in st.session_state: st.session_state['romaneio_xlsx'] = None
-    if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Transferencia"
+    if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Produtos"
     if 'selecao_exclusao' not in st.session_state: st.session_state['selecao_exclusao'] = []
-    # Lista acumulativa
     if 'carga_acumulada' not in st.session_state: st.session_state['carga_acumulada'] = []
     
     # Estados Auto-Fill
@@ -70,6 +69,7 @@ def criar_pdf_unificado(lista_carga):
         
         # PIVOT PARA MATRIZ
         df = pd.DataFrame(lista_carga)
+        # Agrupa somando quantidades iguais para o mesmo destino
         df_pivot = df.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
         
         col_sa = "Hospital Santo Amaro"
@@ -127,7 +127,7 @@ tela = st.session_state['tela_atual']
 df_db = carregar_dados()
 
 # =================================================================================
-# 🚚 TELA DE TRANSFERÊNCIA (FINAL)
+# 🚚 TELA DE TRANSFERÊNCIA
 # =================================================================================
 if tela == "Transferencia":
     st.header("🚚 Transferência / Montagem de Carga")
@@ -215,34 +215,27 @@ if tela == "Transferencia":
             st.markdown("### 2. Carga Completa")
             
             if len(st.session_state['carga_acumulada']) > 0:
-                # --- NOVO: REMOVER ITEM ---
-                with st.expander("❌ Remover Item da Lista"):
-                    # Cria lista para seleção
+                with st.expander("❌ Remover Item"):
                     lista_display = [f"{i} | {d['Produto']} -> {d['Destino']} ({d['Quantidade']})" for i, d in enumerate(st.session_state['carga_acumulada'])]
-                    itens_remover = st.multiselect("Selecione para cancelar:", lista_display)
+                    itens_remover = st.multiselect("Selecione:", lista_display)
                     
                     if st.button("Confirmar Remoção"):
                         indices_remover = [int(s.split(" | ")[0]) for s in itens_remover]
-                        
                         for idx in indices_remover:
                             item = st.session_state['carga_acumulada'][idx]
-                            # Estorna Estoque
                             p = item['Produto']; q = item['Quantidade']; dest = item['Destino']
                             
                             idx_db = df_db[df_db['Produto'] == p].index
                             if not idx_db.empty:
                                 i_db = idx_db[0]
-                                df_db.at[i_db, 'Estoque_Central'] += q # Devolve pro Central
+                                df_db.at[i_db, 'Estoque_Central'] += q 
                                 if "Amaro" in dest: df_db.at[i_db, 'Estoque_SA'] -= q
                                 else: df_db.at[i_db, 'Estoque_SI'] -= q
                         
-                        # Atualiza lista removendo os índices
                         st.session_state['carga_acumulada'] = [val for i, val in enumerate(st.session_state['carga_acumulada']) if i not in indices_remover]
                         salvar_banco(df_db)
-                        st.success("Itens removidos e estoque estornado!")
-                        st.rerun()
+                        st.success("Removido e estornado!"); st.rerun()
 
-                # MOSTRA TABELA RESUMO (PIVOTADA)
                 df_carga = pd.DataFrame(st.session_state['carga_acumulada'])
                 try:
                     df_pivot = df_carga.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
@@ -251,14 +244,14 @@ if tela == "Transferencia":
                 
                 c_btn1, c_btn2 = st.columns(2)
                 
-                if c_btn1.button("✅ Finalizar (Gerar Docs)"):
+                if c_btn1.button("✅ Finalizar"):
                     pdf_bytes = criar_pdf_unificado(st.session_state['carga_acumulada'])
                     st.session_state['romaneio_pdf'] = pdf_bytes
                     
-                    # Gera Excel também
                     buf = io.BytesIO()
                     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                        df_pivot.to_excel(writer, index=False, sheet_name='Romaneio')
+                        try: df_pivot.to_excel(writer, index=False, sheet_name='Romaneio')
+                        except: df_carga.to_excel(writer, index=False, sheet_name='Romaneio')
                     st.session_state['romaneio_xlsx'] = buf.getvalue()
                     st.rerun()
                     
@@ -267,17 +260,16 @@ if tela == "Transferencia":
                     st.session_state['romaneio_pdf'] = None
                     st.rerun()
                 
-                # ÁREA DE DOWNLOAD
                 if st.session_state['romaneio_pdf']:
-                    st.success("Documentos Prontos!")
-                    c_down1, c_down2 = st.columns(2)
-                    c_down1.download_button("📄 Baixar PDF", st.session_state['romaneio_pdf'], f"Romaneio_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
-                    c_down2.download_button("📊 Baixar Excel", st.session_state['romaneio_xlsx'], f"Romaneio_{datetime.now().strftime('%H%M')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.success("Pronto!")
+                    c_d1, c_d2 = st.columns(2)
+                    c_d1.download_button("📄 PDF", st.session_state['romaneio_pdf'], "Romaneio.pdf", "application/pdf")
+                    c_d2.download_button("📊 Excel", st.session_state['romaneio_xlsx'], "Romaneio.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
-                st.info("A carga está vazia.")
+                st.info("Carga vazia.")
 
 # =================================================================================
-# 📦 TELA DE ESTOQUE (MANTIDA)
+# 📦 TELA DE ESTOQUE
 # =================================================================================
 elif tela == "Estoque":
     st.header("📦 Atualização de Estoque (Contagem)")
@@ -299,17 +291,14 @@ elif tela == "Estoque":
                 arq.seek(0)
                 if arq.name.endswith('.csv'): df_n = pd.read_csv(arq, header=hr)
                 else: df_n = pd.read_excel(arq, header=hr)
-                
                 cols = df_n.columns.tolist()
                 c1, c2, c3 = st.columns(3)
                 ic = next((i for i,c in enumerate(cols) if "cod" in str(c).lower()),0)
                 inm = next((i for i,c in enumerate(cols) if "nom" in str(c).lower() or "prod" in str(c).lower()),0)
                 iq = next((i for i,c in enumerate(cols) if "qtd" in str(c).lower() or "sald" in str(c).lower()),0)
-                
                 cc = c1.selectbox("Col Código", cols, index=ic)
                 cn = c2.selectbox("Col Nome", cols, index=inm)
                 cq = c3.selectbox("Col Qtd", cols, index=iq)
-                
                 if st.button("🚀 Processar"):
                     att = 0; novos = []
                     bar = st.progress(0)
@@ -319,8 +308,7 @@ elif tela == "Estoque":
                         if not nom or nom=='nan': continue
                         m = df_db[(df_db['Codigo']==cod)|(df_db['Codigo_Unico']==cod)]
                         if m.empty: m = df_db[df_db['Produto']==nom]
-                        if not m.empty:
-                            df_db.at[m.index[0], col_dest] = qtd; att+=1
+                        if not m.empty: df_db.at[m.index[0], col_dest] = qtd; att+=1
                         else:
                             n = {"Codigo": cod, "Produto": nom, "Categoria": "Novo", "Fornecedor": "Geral", "Padrao": "Un", "Custo": 0, "Min_SA":0, "Min_SI":0, "Estoque_Central":0, "Estoque_SA":0, "Estoque_SI":0}
                             n[col_dest] = qtd; df_db = pd.concat([df_db, pd.DataFrame([n])], ignore_index=True); novos.append(nom)
@@ -372,6 +360,15 @@ elif tela == "Produtos":
                 salvar_banco(df_db); st.success(f"{cnt} processados!"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
             
+    # ÁREA DE APAGAR TUDO (ZONA DE PERIGO)
+    with st.expander("🔥 Limpar Banco de Dados (Zerar Tudo)"):
+        st.error("Cuidado: Isso apaga todos os produtos e estoques!")
+        if st.button("🗑️ APAGAR TUDO"):
+            colunas = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
+            df_vazio = pd.DataFrame(columns=colunas)
+            salvar_banco(df_vazio)
+            st.success("Banco zerado!"); st.rerun()
+
     st.divider()
     a1, a2, a3 = st.tabs(["☕ Café", "🍎 Perecíveis", "📋 Todos"])
     def show(c):
