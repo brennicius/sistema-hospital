@@ -3,13 +3,14 @@ import pandas as pd
 import os
 from datetime import datetime
 from fpdf import FPDF
+import io
 
 # --- CONFIGURAÇÃO ---
 ARQUIVO_DADOS = 'estoque_completo.csv'
 ARQUIVO_LOG = 'historico_log.csv'
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-st.set_page_config(page_title="Sistema 27.3 (Fix Compras)", layout="wide")
+st.set_page_config(page_title="Sistema 27.4 (Excel)", layout="wide")
 
 # --- INICIALIZAÇÃO DE ESTADO ---
 def init_state():
@@ -153,7 +154,7 @@ def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- INTERFACE ---
-st.title("🚀 Sistema Integrado 27.3")
+st.title("🚀 Sistema Integrado 27.4")
 df_geral = carregar_dados_cache()
 
 with st.sidebar:
@@ -161,7 +162,6 @@ with st.sidebar:
     modo = st.radio("Ir para:", UNIDADES)
     st.divider()
     
-    # Uploads
     if modo in ["Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel"]:
         with st.expander("📦 Upload Estoque"):
             f = st.file_uploader("Arquivo", type=['csv', 'xlsx'], key="ue")
@@ -250,17 +250,13 @@ elif modo == "📜 Histórico":
 elif modo == "🛒 Compras":
     st.subheader("Compras")
     
-    # 1. Recupera Tabela
     if st.session_state['df_compras_temp'] is None:
         base = df_geral[df_geral['Loja']=="Estoque Central"][['Produto','Fornecedor','Custo_Unit']].copy()
         base = base.drop_duplicates('Produto').sort_values('Produto')
-        # Garante nome da coluna unificado
         base['Qtd'] = 0 
         st.session_state['df_compras_temp'] = base
     
-    # 2. Correção de Colunas (Se vier de versão antiga com 'Qtd Pedido')
     if 'Qtd' not in st.session_state['df_compras_temp'].columns:
-        # Se tiver 'Qtd Pedido', renomeia ou recria
         st.session_state['df_compras_temp'] = None
         st.rerun()
 
@@ -281,18 +277,37 @@ elif modo == "🛒 Compras":
     total_ped = ed['Total'].sum()
     st.metric("Total", f"R$ {total_ped:,.2f}")
     
-    if st.button("Baixar Pedido PDF"):
-        # Recalcula e filtra antes de enviar para o PDF
-        i = st.session_state['df_compras_temp'].copy()
-        i['Total'] = i['Qtd'] * i['Custo_Unit']
-        i = i[i['Qtd']>0]
+    c1, c2 = st.columns(2)
+    
+    # 1. BOTÃO PDF
+    with c1:
+        if st.button("📄 Baixar Pedido PDF"):
+            i = st.session_state['df_compras_temp'].copy()
+            i['Total'] = i['Qtd'] * i['Custo_Unit']
+            i = i[i['Qtd']>0]
+            if not i.empty:
+                pdf_bytes = criar_pdf_generico(i[['Produto','Fornecedor','Qtd','Total']], "PEDIDO DE COMPRA", [90,50,20,30])
+                st.download_button("Clique para Baixar PDF", pdf_bytes, "Pedido.pdf", "application/pdf")
+                registrar_log("Vários", len(i), "Compra", f"R$ {total_ped:.2f}")
+            else: st.warning("Vazio")
+
+    # 2. BOTÃO EXCEL (NOVIDADE)
+    with c2:
+        i_xls = st.session_state['df_compras_temp'].copy()
+        i_xls['Total'] = i_xls['Qtd'] * i_xls['Custo_Unit']
+        i_xls = i_xls[i_xls['Qtd']>0]
         
-        if not i.empty:
-            # Envia as colunas CERTAS que existem no dataframe
-            pdf_bytes = criar_pdf_generico(i[['Produto','Fornecedor','Qtd','Total']], "PEDIDO DE COMPRA", [90,50,20,30])
-            st.download_button("Clique para Baixar", pdf_bytes, "Pedido.pdf", "application/pdf")
-            registrar_log("Vários", len(i), "Compra", f"R$ {total_ped:.2f}")
-        else: st.warning("Vazio")
+        if not i_xls.empty:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                i_xls[['Produto','Fornecedor','Qtd','Total']].to_excel(writer, index=False, sheet_name='Pedido')
+            
+            st.download_button(
+                label="📊 Baixar Pedido Excel",
+                data=buffer.getvalue(),
+                file_name="Pedido_Compra.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 elif modo == "Estoque Central":
     if st.session_state['distribuicao_concluida']:
@@ -373,5 +388,5 @@ else:
     df_l = df_geral[df_geral['Loja'] == modo].copy()
     if not df_l.empty:
         renderizar_baixa_por_arquivo(df_geral, modo)
-        st.dataframe(df_l[['Produto','Estoque_Atual','Media_Vendas_Semana']], use_container_width=True)
+        st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
     else: st.info("Vazio")
