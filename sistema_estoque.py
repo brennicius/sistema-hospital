@@ -6,7 +6,7 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Gestão 36.0 (Reset)", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema Gestão 36.0 (Inteiros)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 ARQUIVO_LOG = "historico_log.csv"
 
@@ -46,13 +46,18 @@ def salvar_banco(df):
     carregar_dados.clear()
 
 def limpar_numero(valor):
-    if pd.isna(valor): return 0.0
-    s = str(valor).lower().replace('r$', '').replace(' ', '').replace(',', '.')
-    try: return float(s)
-    except: return 0.0
+    if pd.isna(valor): return 0
+    # Remove textos e converte para float primeiro
+    s = str(valor).lower().replace('r$', '').replace('kg', '').replace('un', '').replace(' ', '')
+    if ',' in s and '.' in s: s = s.replace('.', '').replace(',', '.')
+    else: s = s.replace(',', '.')
+    try: 
+        # Retorna inteiro arredondado
+        return int(float(s))
+    except: return 0
 
 def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
-    novo = {"Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Produto": produto, "Quantidade": quantidade, "Tipo": tipo, "Detalhe": origem_destino, "Usuario": usuario}
+    novo = {"Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Produto": produto, "Quantidade": int(quantidade), "Tipo": tipo, "Detalhe": origem_destino, "Usuario": usuario}
     if not os.path.exists(ARQUIVO_LOG): df = pd.DataFrame(columns=["Data", "Produto", "Quantidade", "Tipo", "Detalhe", "Usuario"])
     else: df = pd.read_csv(ARQUIVO_LOG)
     pd.concat([df, pd.DataFrame([novo])], ignore_index=True).to_csv(ARQUIVO_LOG, index=False)
@@ -69,7 +74,9 @@ def criar_pdf_unificado(lista_carga):
         
         # PIVOT PARA MATRIZ
         df = pd.DataFrame(lista_carga)
-        # Agrupa somando quantidades iguais para o mesmo destino
+        # Garante inteiros
+        df['Quantidade'] = df['Quantidade'].astype(int)
+        
         df_pivot = df.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
         
         col_sa = "Hospital Santo Amaro"
@@ -87,6 +94,7 @@ def criar_pdf_unificado(lista_carga):
         pdf.set_font("Arial", size=10)
         for index, row in df_pivot.iterrows():
             prod = str(row['Produto']).encode('latin-1', 'replace').decode('latin-1')[:55]
+            # Força conversão para INT na visualização
             qtd_sa = str(int(row[col_sa])) if row[col_sa] > 0 else "-"
             qtd_si = str(int(row[col_si])) if row[col_si] > 0 else "-"
             
@@ -155,8 +163,10 @@ if tela == "Transferencia":
             if st.button("🪄 Preencher Sugestão (Meta - Atual)"):
                 df_calc = df_db[['Produto', 'Estoque_Central', col_estoque_loja, col_minimo]].copy()
                 df_calc['Sugestao'] = df_calc[col_minimo] - df_calc[col_estoque_loja]
-                df_calc['Sugestao'] = df_calc['Sugestao'].apply(lambda x: max(0, x))
-                df_calc['➡️ Enviar'] = df_calc[['Sugestao', 'Estoque_Central']].min(axis=1)
+                df_calc['Sugestao'] = df_calc['Sugestao'].apply(lambda x: max(0, int(x))) # Inteiro
+                # Garante que não envia mais que o central e mantém inteiro
+                df_calc['➡️ Enviar'] = df_calc[['Sugestao', 'Estoque_Central']].min(axis=1).astype(int)
+                
                 st.session_state['transf_df_cache'] = df_calc
                 st.session_state['transf_key_ver'] += 1
                 st.success("Preenchido!"); st.rerun()
@@ -165,19 +175,20 @@ if tela == "Transferencia":
                 df_view = st.session_state['transf_df_cache'].copy()
             else:
                 df_view = df_db[['Produto', 'Estoque_Central', col_estoque_loja, col_minimo]].copy()
-                df_view['➡️ Enviar'] = 0.0
+                df_view['➡️ Enviar'] = 0 # Inteiro inicial
 
             busca = st.text_input("🔍 Buscar Produto:", "")
             if busca: df_view = df_view[df_view['Produto'].str.contains(busca, case=False, na=False)]
             
+            # CONFIGURAÇÃO DE FORMATO INTEIRO (%d)
             edited_df = st.data_editor(
                 df_view,
                 column_config={
                     "Produto": st.column_config.TextColumn(disabled=True),
-                    "Estoque_Central": st.column_config.NumberColumn("Central", disabled=True, format="%.0f"),
-                    col_estoque_loja: st.column_config.NumberColumn("Loja", disabled=True, format="%.0f"),
-                    col_minimo: st.column_config.NumberColumn("Meta", disabled=True, format="%.0f"),
-                    "➡️ Enviar": st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.0f"),
+                    "Estoque_Central": st.column_config.NumberColumn("Central", disabled=True, format="%d"),
+                    col_estoque_loja: st.column_config.NumberColumn("Loja", disabled=True, format="%d"),
+                    col_minimo: st.column_config.NumberColumn("Meta", disabled=True, format="%d"),
+                    "➡️ Enviar": st.column_config.NumberColumn(min_value=0, step=1, format="%d"), # Step 1 força inteiro
                     "Sugestao": None
                 },
                 use_container_width=True, hide_index=True, height=400, key=f"editor_transf_{st.session_state['transf_key_ver']}"
@@ -189,11 +200,11 @@ if tela == "Transferencia":
                 else:
                     erro = False; temp_lista = []
                     for idx, row in itens_enviar.iterrows():
-                        prod = row['Produto']; qtd = row['➡️ Enviar']
+                        prod = row['Produto']; qtd = int(row['➡️ Enviar']) # Força int
                         idx_db = df_db[df_db['Produto'] == prod].index[0]
                         saldo_real = df_db.at[idx_db, 'Estoque_Central']
                         
-                        if qtd > saldo_real: st.error(f"Erro: {prod} só tem {saldo_real}."); erro = True; break
+                        if qtd > saldo_real: st.error(f"Erro: {prod} só tem {int(saldo_real)}."); erro = True; break
                         
                         df_db.at[idx_db, 'Estoque_Central'] -= qtd
                         if "Amaro" in destino_sel: df_db.at[idx_db, 'Estoque_SA'] += qtd
@@ -238,7 +249,9 @@ if tela == "Transferencia":
 
                 df_carga = pd.DataFrame(st.session_state['carga_acumulada'])
                 try:
+                    # Pivot com inteiros
                     df_pivot = df_carga.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
+                    # Configuração visual para inteiros
                     st.dataframe(df_pivot, use_container_width=True, hide_index=True, height=300)
                 except: st.dataframe(df_carga, use_container_width=True)
                 
@@ -266,7 +279,7 @@ if tela == "Transferencia":
                     c_d1.download_button("📄 PDF", st.session_state['romaneio_pdf'], "Romaneio.pdf", "application/pdf")
                     c_d2.download_button("📊 Excel", st.session_state['romaneio_xlsx'], "Romaneio.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
-                st.info("Carga vazia.")
+                st.info("A carga está vazia.")
 
 # =================================================================================
 # 📦 TELA DE ESTOQUE
@@ -291,14 +304,17 @@ elif tela == "Estoque":
                 arq.seek(0)
                 if arq.name.endswith('.csv'): df_n = pd.read_csv(arq, header=hr)
                 else: df_n = pd.read_excel(arq, header=hr)
+                
                 cols = df_n.columns.tolist()
                 c1, c2, c3 = st.columns(3)
                 ic = next((i for i,c in enumerate(cols) if "cod" in str(c).lower()),0)
                 inm = next((i for i,c in enumerate(cols) if "nom" in str(c).lower() or "prod" in str(c).lower()),0)
                 iq = next((i for i,c in enumerate(cols) if "qtd" in str(c).lower() or "sald" in str(c).lower()),0)
+                
                 cc = c1.selectbox("Col Código", cols, index=ic)
                 cn = c2.selectbox("Col Nome", cols, index=inm)
                 cq = c3.selectbox("Col Qtd", cols, index=iq)
+                
                 if st.button("🚀 Processar"):
                     att = 0; novos = []
                     bar = st.progress(0)
@@ -308,7 +324,8 @@ elif tela == "Estoque":
                         if not nom or nom=='nan': continue
                         m = df_db[(df_db['Codigo']==cod)|(df_db['Codigo_Unico']==cod)]
                         if m.empty: m = df_db[df_db['Produto']==nom]
-                        if not m.empty: df_db.at[m.index[0], col_dest] = qtd; att+=1
+                        if not m.empty:
+                            df_db.at[m.index[0], col_dest] = qtd; att+=1
                         else:
                             n = {"Codigo": cod, "Produto": nom, "Categoria": "Novo", "Fornecedor": "Geral", "Padrao": "Un", "Custo": 0, "Min_SA":0, "Min_SI":0, "Estoque_Central":0, "Estoque_SA":0, "Estoque_SI":0}
                             n[col_dest] = qtd; df_db = pd.concat([df_db, pd.DataFrame([n])], ignore_index=True); novos.append(nom)
@@ -320,7 +337,7 @@ elif tela == "Estoque":
     st.divider()
     filt = st.text_input("Filtrar:", placeholder="Nome...")
     v = df_db[df_db['Produto'].str.contains(filt, case=False, na=False)] if filt else df_db
-    st.dataframe(v[['Codigo', 'Produto', 'Padrao', col_dest]], use_container_width=True, hide_index=True)
+    st.dataframe(v[['Codigo', 'Produto', 'Padrao', col_dest]].style.format({col_dest: "{:.0f}"}), use_container_width=True, hide_index=True)
 
 # =================================================================================
 # 📋 TELA DE PRODUTOS
@@ -360,21 +377,20 @@ elif tela == "Produtos":
                 salvar_banco(df_db); st.success(f"{cnt} processados!"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
             
-    # ÁREA DE APAGAR TUDO (ZONA DE PERIGO)
-    with st.expander("🔥 Limpar Banco de Dados (Zerar Tudo)"):
-        st.error("Cuidado: Isso apaga todos os produtos e estoques!")
-        if st.button("🗑️ APAGAR TUDO"):
-            colunas = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
-            df_vazio = pd.DataFrame(columns=colunas)
-            salvar_banco(df_vazio)
-            st.success("Banco zerado!"); st.rerun()
-
     st.divider()
+    # Adicionando botão de apagar tudo (Reset)
+    with st.expander("🔥 Zona de Perigo (Apagar Tudo)"):
+        if st.button("🗑️ APAGAR TODO BANCO DE DADOS"):
+            colunas_limpas = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
+            df_vazio = pd.DataFrame(columns=colunas_limpas)
+            salvar_banco(df_vazio)
+            st.success("Banco de dados resetado!"); st.rerun()
+
     a1, a2, a3 = st.tabs(["☕ Café", "🍎 Perecíveis", "📋 Todos"])
     def show(c):
         d = df_db if c=="Todos" else df_db[df_db['Categoria']==c]
         if not d.empty:
-            st.dataframe(d[['Codigo','Produto','Fornecedor','Padrao','Custo']], use_container_width=True, hide_index=True)
+            st.dataframe(d[['Codigo','Produto','Fornecedor','Padrao','Custo']].style.format({"Custo": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
             cd1, cd2 = st.columns([4,1])
             sel = cd1.selectbox(f"Excluir ({c})", d['Produto'].unique(), key=f"d_{c}", index=None)
             if sel and cd2.button("🗑️", key=f"b_{c}"):
