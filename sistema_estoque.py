@@ -10,9 +10,9 @@ ARQUIVO_DADOS = 'estoque_completo.csv'
 ARQUIVO_LOG = 'historico_log.csv'
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-st.set_page_config(page_title="Sistema 28.0 (Parâmetros)", layout="wide")
+st.set_page_config(page_title="Sistema Master 29.0", layout="wide")
 
-# --- INICIALIZAÇÃO DE ESTADO ---
+# --- INICIALIZAÇÃO ---
 def init_state():
     keys = ['df_distribuicao_temp', 'df_compras_temp', 'romaneio_final', 'romaneio_pdf_cache', 
             'distribuicao_concluida', 'pedido_compra_final', 'selecao_exclusao']
@@ -36,22 +36,31 @@ def limpar_numero(valor):
 # --- DADOS ---
 @st.cache_data
 def carregar_dados_cache():
-    colunas = ["Loja", "Produto", "Estoque_Atual", "Media_Vendas_Semana", "Ultima_Atualizacao", "Fornecedor", "Custo_Unit"]
+    # Novas colunas baseadas na sua planilha Mestre
+    colunas = [
+        "Loja", "Codigo", "Codigo_Unico", "Produto", "Produto_Alt", 
+        "Fornecedor", "Padrao", "Custo_Unit", 
+        "Min_SA", "Min_SI", "Estoque_Atual", "Ultima_Atualizacao"
+    ]
+    
     if not os.path.exists(ARQUIVO_DADOS): return pd.DataFrame(columns=colunas)
     try: df = pd.read_csv(ARQUIVO_DADOS)
     except: return pd.DataFrame(columns=colunas)
     
-    for c in ["Estoque_Atual", "Media_Vendas_Semana", "Custo_Unit"]:
-        if c in df.columns: df[c] = df[c].apply(limpar_numero)
+    # Garante tipos numéricos
+    for c in ["Estoque_Atual", "Custo_Unit", "Min_SA", "Min_SI"]:
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         else: df[c] = 0
-    
-    if "Fornecedor" not in df.columns: df["Fornecedor"] = "Geral"
-    df["Fornecedor"] = df["Fornecedor"].fillna("Geral").astype(str)
-    
+            
+    # Garante textos
+    for c in ["Codigo", "Codigo_Unico", "Produto", "Fornecedor", "Padrao"]:
+        if c not in df.columns: df[c] = ""
+        df[c] = df[c].astype(str).replace('nan', '')
+
+    # Remove duplicatas exatas de logica
     if not df.empty:
-        df = df.groupby(['Loja', 'Produto', 'Fornecedor', 'Ultima_Atualizacao'], as_index=False).agg({
-            'Estoque_Atual': 'sum', 'Media_Vendas_Semana': 'max', 'Custo_Unit': 'max'
-        })
+        df = df.groupby(['Loja', 'Produto'], as_index=False).first() # Prioriza cadastro único por loja
+        
     return df
 
 def salvar_dados(df):
@@ -78,19 +87,19 @@ def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
         if not colunas_largura:
             l = 190 // len(cols)
             larguras = [l] * len(cols)
-            if "Produto" in cols: larguras[cols.index("Produto")] = 80
+            if "Produto" in cols: larguras[cols.index("Produto")] = 70
         else: larguras = colunas_largura
-        pdf.set_font("Arial", 'B', 9)
+        pdf.set_font("Arial", 'B', 8)
         for i, col in enumerate(cols): 
             txt = str(col).encode('latin-1', 'replace').decode('latin-1')
             pdf.cell(larguras[i], 10, txt[:20], 1, 0, 'C')
         pdf.ln()
-        pdf.set_font("Arial", size=9)
+        pdf.set_font("Arial", size=8)
         for index, row in dataframe.iterrows():
             for i, col in enumerate(cols):
                 txt = str(row[col]).encode('latin-1', 'replace').decode('latin-1')
                 align = 'L' if i==0 else 'C'
-                pdf.cell(larguras[i], 10, txt[:45], 1, 0, align)
+                pdf.cell(larguras[i], 10, txt[:40], 1, 0, align)
             pdf.ln()
         return pdf.output(dest='S').encode('latin-1', 'replace')
     except Exception as e: return str(e).encode('utf-8')
@@ -125,39 +134,72 @@ def calcular_cmv_mensal():
 
 def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
     st.markdown("---")
-    with st.expander("📉 Baixar Vendas do Dia (Upload Relatório)", expanded=True):
-        arquivo_vendas = st.file_uploader("Relatório de Vendas (Excel/CSV)", type=['csv', 'xlsx'], key="up_vendas")
-        if arquivo_vendas:
+    with st.expander("📉 Baixar Vendas (Inteligente)", expanded=True):
+        f = st.file_uploader("Relatório Vendas", type=['csv', 'xlsx'], key="up_ven")
+        if f:
             try:
-                if arquivo_vendas.name.endswith('.csv'): df_vendas = pd.read_csv(arquivo_vendas)
-                else: df_vendas = pd.read_excel(arquivo_vendas)
-                st.write("Confirme as colunas:")
-                c1, c2 = st.columns(2)
-                cols = df_vendas.columns.tolist()
-                idx_n = next((i for i, c in enumerate(cols) if "nome" in c.lower() or "prod" in c.lower() or "desc" in c.lower()), 0)
-                idx_q = next((i for i, c in enumerate(cols) if "qtd" in c.lower() or "quant" in c.lower()), 0)
-                cn = c1.selectbox("Coluna Produto", cols, index=idx_n)
-                cq = c2.selectbox("Coluna Qtd", cols, index=idx_q)
-                if st.button("🚀 Processar Baixa"):
+                df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
+                st.info("O sistema tentará identificar o produto pelo Código ou Nome.")
+                
+                # Seleção de Colunas Chave
+                cols = df.columns.tolist()
+                c1, c2, c3 = st.columns(3)
+                
+                # Tentativa de auto-seleção
+                i_cod = next((i for i, c in enumerate(cols) if "cod" in c.lower() or "cód" in c.lower()), 0)
+                i_nom = next((i for i, c in enumerate(cols) if "nom" in c.lower() or "prod" in c.lower()), 0)
+                i_qtd = next((i for i, c in enumerate(cols) if "qtd" in c.lower()), 0)
+                
+                col_cod = c1.selectbox("Coluna Código (Opcional)", ["Ignorar"] + cols, index=i_cod+1)
+                col_nom = c2.selectbox("Coluna Nome", cols, index=i_nom)
+                col_qtd = c3.selectbox("Coluna Qtd", cols, index=i_qtd)
+                
+                if st.button("🚀 Processar"):
                     suc = 0; err = []
-                    for i, r in df_vendas.iterrows():
-                        p = str(r[cn]).strip()
-                        q = limpar_numero(r[cq])
-                        if q > 0:
-                            mask = (df_geral['Loja'] == loja_selecionada) & (df_geral['Produto'] == p)
-                            if mask.any():
-                                cur = df_geral.loc[mask, 'Estoque_Atual'].values[0]
-                                df_geral.loc[mask, 'Estoque_Atual'] = max(0, cur - q)
-                                suc += 1
-                            else: err.append(p)
+                    # Prepara banco de dados da loja para busca rápida
+                    db_loja = df_geral[df_geral['Loja'] == loja_selecionada].copy()
+                    
+                    for i, r in df.iterrows():
+                        qtd = limpar_numero(r[col_qtd])
+                        if qtd <= 0: continue
+                        
+                        match = pd.DataFrame()
+                        
+                        # 1. Tenta pelo Código (Se selecionado)
+                        if col_cod != "Ignorar":
+                            cod_busca = str(r[col_cod]).strip()
+                            # Busca em Codigo ou Codigo_Unico
+                            match = db_loja[
+                                (db_loja['Codigo'] == cod_busca) | 
+                                (db_loja['Codigo_Unico'] == cod_busca)
+                            ]
+                        
+                        # 2. Se não achou, tenta pelo Nome
+                        if match.empty:
+                            nom_busca = str(r[col_nom]).strip()
+                            match = db_loja[db_loja['Produto'] == nom_busca]
+                            
+                        # Se achou
+                        if not match.empty:
+                            idx = match.index[0]
+                            # Abate do Geral
+                            cur = df_geral.loc[idx, 'Estoque_Atual']
+                            df_geral.loc[idx, 'Estoque_Atual'] = max(0, cur - qtd)
+                            suc += 1
+                        else:
+                            err.append(f"{r[col_nom]}")
+
                     if suc > 0:
-                        df_geral.loc[df_geral['Loja'] == loja_selecionada, 'Ultima_Atualizacao'] = datetime.now().strftime("%d/%m %H:%M")
-                        salvar_dados(df_geral); registrar_log("Vários", suc, "Venda", f"Arquivo {loja_selecionada}"); st.success(f"✅ {suc} itens baixados!"); st.rerun()
-                    else: st.warning("Nenhum item processado.")
+                        salvar_dados(df_geral); registrar_log("Lote", suc, "Venda", loja_selecionada)
+                        st.success(f"✅ Baixados: {suc}")
+                        if err: 
+                            with st.expander(f"⚠️ {len(err)} Não encontrados (Verifique cadastro):"):
+                                st.write(err)
+                        st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- INTERFACE ---
-st.title("🚀 Sistema Integrado 28.0")
+st.title("🚀 Sistema Master 29.0")
 df_geral = carregar_dados_cache()
 
 with st.sidebar:
@@ -165,91 +207,113 @@ with st.sidebar:
     modo = st.radio("Ir para:", UNIDADES)
     st.divider()
     
-    # UPLOAD ESTOQUE (QUANTIDADE FÍSICA)
-    if modo in ["Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel"]:
-        with st.expander("📦 Upload Estoque (Contagem)"):
-            st.info("Atualiza a quantidade física. Mantém média e preço.")
-            f = st.file_uploader("Planilha Estoque", type=['csv', 'xlsx'], key="ue")
-            if f:
-                try:
-                    df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
-                    mapa = {}
-                    for c in df.columns:
-                        cl = c.lower()
-                        if "prod" in cl or "nome" in cl: mapa[c] = "Produto"
-                        elif any(x in cl for x in ['est','qtd','quant','saldo','contagem']): mapa[c] = "Estoque_Atual"
-                    df = df.rename(columns=mapa)
-                    if "Produto" in df.columns:
-                        if "Estoque_Atual" in df.columns: df["Estoque_Atual"] = df["Estoque_Atual"].apply(limpar_numero)
-                        else: df["Estoque_Atual"] = 0
-                        df["Loja"] = modo; df["Ultima_Atualizacao"] = datetime.now().strftime("%d/%m %H:%M")
-                        
-                        # Preserva Média e Preço
-                        ant = df_geral[df_geral['Loja']==modo].set_index('Produto')
-                        ant = ant[~ant.index.duplicated(keep='first')]
-                        df = df.set_index('Produto')
-                        
-                        if not ant.empty:
-                            df['Media_Vendas_Semana'] = df.index.map(ant['Media_Vendas_Semana']).fillna(0)
-                            df['Fornecedor'] = df.index.map(ant['Fornecedor']).fillna("Geral")
-                            df['Custo_Unit'] = df.index.map(ant['Custo_Unit']).fillna(0)
-                        else: 
-                            df['Media_Vendas_Semana']=0; df['Fornecedor']="Geral"; df['Custo_Unit']=0
-                        
-                        out = df_geral[df_geral['Loja']!=modo]
-                        salvar_dados(pd.concat([out, df.reset_index()], ignore_index=True))
-                        resetar_processos(); st.success("Estoque Atualizado!"); st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
-
-        # ATUALIZAR PARÂMETROS (MÉDIA) - NOVO!
-        with st.expander("⚙️ Atualizar Média/Parâmetros"):
-            st.info("Atualiza apenas a meta/média. Não muda o estoque físico.")
-            f_param = st.file_uploader("Planilha Parâmetros", type=['csv', 'xlsx'], key="up_param")
-            if f_param:
-                try:
-                    df_p = pd.read_csv(f_param) if f_param.name.endswith('.csv') else pd.read_excel(f_param)
-                    st.write("Selecione as colunas:")
-                    cp1, cp2 = st.columns(2)
-                    cols_p = df_p.columns.tolist()
-                    idx_pn = next((i for i, c in enumerate(cols_p) if "prod" in c.lower() or "nome" in c.lower()), 0)
-                    idx_pm = next((i for i, c in enumerate(cols_p) if any(x in c.lower() for x in ['med','méd','param','padr','min'])), 0)
-                    
-                    c_prod = cp1.selectbox("Produto", cols_p, index=idx_pn)
-                    c_media = cp2.selectbox("Média/Parâmetro", cols_p, index=idx_pm)
-                    
-                    if st.button("💾 Salvar Médias"):
-                        df_p = df_p.rename(columns={c_prod: "Produto", c_media: "Nova_Media"})
-                        df_p["Nova_Media"] = df_p["Nova_Media"].apply(limpar_numero)
-                        df_p = df_p.set_index("Produto")
-                        
-                        # Atualiza apenas a loja atual
-                        df_g = df_geral.set_index("Produto")
-                        mask_loja = df_g['Loja'] == modo
-                        
-                        # Atualiza onde coincidir
-                        df_g.loc[mask_loja, 'Media_Vendas_Semana'] = df_g.loc[mask_loja].index.map(df_p['Nova_Media']).fillna(df_g.loc[mask_loja, 'Media_Vendas_Semana'])
-                        
-                        salvar_dados(df_g.reset_index()); st.success("Parâmetros Atualizados!"); st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
-
-    with st.expander("💲 Atualizar Preços"):
-        f = st.file_uploader("Arquivo", type=['csv', 'xlsx'], key="up")
-        if f and st.button("Salvar Preços"):
+    # --- UPLOAD DA PLANILHA MESTRE (CADASTRO) ---
+    with st.expander("📂 ATUALIZAR CADASTRO (Mestre)"):
+        st.info("Use a 'Planilha de Fornecedor' para atualizar dados cadastrais.")
+        f = st.file_uploader("Planilha Base", type=['xlsx', 'csv'], key="up_mestre")
+        if f and st.button("Processar Cadastro"):
             try:
                 df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
-                mapa = {}
-                for c in df.columns:
-                    cl = c.lower()
-                    if "prod" in cl: mapa[c] = "Produto"
-                    elif "forn" in cl: mapa[c] = "Fornecedor"
-                    elif any(x in cl for x in ['cust', 'pre', 'valor']): mapa[c] = "Custo_Unit"
-                df = df.rename(columns=mapa)
-                if "Custo_Unit" in df.columns: df["Custo_Unit"] = df["Custo_Unit"].apply(limpar_numero)
-                df = df.drop_duplicates('Produto').set_index('Produto')
-                g = df_geral.set_index('Produto')
-                if "Fornecedor" in df.columns: g.update(df[['Fornecedor']])
-                if "Custo_Unit" in df.columns: g.update(df[['Custo_Unit']])
-                salvar_dados(g.reset_index()); st.success("Ok!"); st.rerun()
+                
+                # Mapeamento Manual (Hardcoded para a planilha do usuário)
+                # Col A: Codigo, B: Cod Unico, C: Nome, Fornecedor, Padrão, Custo Unit., Minimos
+                
+                # Vamos criar um dicionário de produtos baseados nesta planilha
+                # Para cada produto na planilha mestre, atualizamos ou criamos nas 3 lojas
+                
+                cnt_atualizados = 0
+                
+                # Carrega estado atual
+                df_novo_estado = df_geral.copy()
+                
+                # Lista de lojas para garantir existência
+                lojas_sistema = ["Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel"]
+                
+                for i, row in df.iterrows():
+                    # Mapeia colunas da planilha do usuário (ajustar indices se mudar)
+                    # Assumindo ordem: A(0), B(1), C(2), ... Fornecedor, Padrão, Custo, Min SA, Min SI
+                    
+                    # Tenta pegar pelo nome da coluna se existir, senão pelo índice
+                    try: cod = str(row['Código']).strip()
+                    except: cod = ""
+                    
+                    try: cod_u = str(row['Código Único']).strip()
+                    except: cod_u = ""
+                    
+                    # Nome: Tenta 'Nome do Produto'
+                    try: prod = str(row['Nome do Produto']).strip()
+                    except: prod = "Produto sem nome"
+                    
+                    if prod == "nan" or prod == "": continue
+                    
+                    # Dados extras
+                    forn = str(row.get('Fornecedor', 'Geral')).strip()
+                    padr = str(row.get('Padrão', '')).strip()
+                    custo = limpar_numero(row.get('Custo Unit.', 0))
+                    min_sa = limpar_numero(row.get('MINIMO SANTO AMARO', 0))
+                    min_si = limpar_numero(row.get('MINIMO SANTA IZABEL', 0))
+                    
+                    # Para cada loja do sistema, atualiza/cria o registro deste produto
+                    for loja in lojas_sistema:
+                        # Busca se já existe
+                        mask = (df_novo_estado['Loja'] == loja) & (df_novo_estado['Produto'] == prod)
+                        
+                        if mask.any():
+                            # Atualiza dados cadastrais (Mantém estoque)
+                            df_novo_estado.loc[mask, 'Codigo'] = cod
+                            df_novo_estado.loc[mask, 'Codigo_Unico'] = cod_u
+                            df_novo_estado.loc[mask, 'Fornecedor'] = forn
+                            df_novo_estado.loc[mask, 'Padrao'] = padr
+                            df_novo_estado.loc[mask, 'Custo_Unit'] = custo
+                            df_novo_estado.loc[mask, 'Min_SA'] = min_sa
+                            df_novo_estado.loc[mask, 'Min_SI'] = min_si
+                        else:
+                            # Cria novo
+                            novo_item = {
+                                "Loja": loja, "Produto": prod, "Estoque_Atual": 0,
+                                "Codigo": cod, "Codigo_Unico": cod_u,
+                                "Fornecedor": forn, "Padrao": padr, "Custo_Unit": custo,
+                                "Min_SA": min_sa, "Min_SI": min_si,
+                                "Ultima_Atualizacao": datetime.now().strftime("%d/%m %H:%M")
+                            }
+                            df_novo_estado = pd.concat([df_novo_estado, pd.DataFrame([novo_item])], ignore_index=True)
+                            
+                    cnt_atualizados += 1
+                
+                salvar_dados(df_novo_estado)
+                resetar_processos()
+                st.success(f"Cadastro Mestre Atualizado! {cnt_atualizados} produtos processados.")
+                st.rerun()
+                
+            except Exception as e: st.error(f"Erro ao processar: {e}")
+
+    # UPLOAD DE CONTAGEM (QUANTIDADE APENAS)
+    with st.expander("📦 Upload Contagem (Só Estoque)"):
+        f = st.file_uploader("Planilha Contagem", type=['csv', 'xlsx'], key="up_cont")
+        if f and st.button("Atualizar Estoque"):
+            try:
+                df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
+                cols = df.columns.tolist()
+                c1, c2 = st.columns(2)
+                # Seleção manual para evitar erro
+                in_n = next((i for i, c in enumerate(cols) if "nome" in c.lower()), 0)
+                in_q = next((i for i, c in enumerate(cols) if "qtd" in c.lower() or "saldo" in c.lower()), 0)
+                cn = c1.selectbox("Col Produto", cols, index=in_n)
+                cq = c2.selectbox("Col Qtd", cols, index=in_q)
+                
+                suc = 0
+                for i, r in df.iterrows():
+                    p = str(r[cn]).strip()
+                    q = limpar_numero(r[cq])
+                    # Busca e atualiza
+                    m = (df_geral['Loja'] == modo) & (df_geral['Produto'] == p)
+                    if m.any():
+                        df_geral.loc[m, 'Estoque_Atual'] = q
+                        suc += 1
+                
+                if suc > 0:
+                    salvar_dados(df_geral); st.success(f"{suc} estoques atualizados!"); st.rerun()
+                else: st.warning("Nenhum produto encontrado.")
             except: st.error("Erro")
 
     with st.expander("🗑️ Lixeira"):
@@ -273,15 +337,11 @@ if modo == "📊 Dashboard":
     k2.metric("Volume", f"{df_c['Estoque_Atual'].sum():,.0f}")
     k3.metric("Zerados", len(df_c[df_c['Estoque_Atual']<=0]))
     st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### 🔥 Consumo (CMV)")
-        cmv = calcular_cmv_mensal()
-        if not cmv.empty: st.bar_chart(cmv.set_index('Loja'))
-        else: st.info("Sem dados")
-    with c2:
-        st.markdown("### 🏆 Top Valor")
-        st.bar_chart(df_c.groupby('Produto')['Valor'].sum().sort_values(ascending=False).head(10))
+    
+    st.markdown("### 🔥 Consumo (CMV)")
+    cmv = calcular_cmv_mensal()
+    if not cmv.empty: st.bar_chart(cmv.set_index('Loja'))
+    else: st.info("Sem dados")
 
 elif modo == "📜 Histórico":
     st.subheader("Log")
@@ -289,15 +349,57 @@ elif modo == "📜 Histórico":
     else: st.info("Vazio")
 
 elif modo == "🛒 Compras":
-    st.subheader("Compras")
+    st.subheader("Compras (Baseado no Mínimo)")
+    
+    # Botão de Sugestão Inteligente (Usa o Mínimo cadastrado)
+    if st.button("🪄 Gerar Sugestão (Estoque < Mínimo)"):
+        # Lógica: Varre hospitais, vê o que tá abaixo do mínimo e soma a necessidade
+        sugestoes = {} # {Produto: Qtd}
+        
+        # 1. Analisa Santo Amaro
+        df_sa = df_geral[df_geral['Loja'] == "Hosp. Santo Amaro"]
+        for i, r in df_sa.iterrows():
+            if r['Estoque_Atual'] < r['Min_SA']:
+                qtd = r['Min_SA'] - r['Estoque_Atual']
+                sugestoes[r['Produto']] = sugestoes.get(r['Produto'], 0) + qtd
+                
+        # 2. Analisa Santa Izabel
+        df_si = df_geral[df_geral['Loja'] == "Hosp. Santa Izabel"]
+        for i, r in df_si.iterrows():
+            if r['Estoque_Atual'] < r['Min_SI']:
+                qtd = r['Min_SI'] - r['Estoque_Atual']
+                sugestoes[r['Produto']] = sugestoes.get(r['Produto'], 0) + qtd
+                
+        # 3. Abate do que tem no Central
+        df_cen = df_geral[df_geral['Loja'] == "Estoque Central"].set_index('Produto')
+        
+        lista_final = []
+        for prod, qtd_nec in sugestoes.items():
+            # Verifica se tem no central
+            tem_central = df_cen.loc[prod, 'Estoque_Atual'] if prod in df_cen.index else 0
+            
+            # Só compra o que o Central NÃO consegue cobrir
+            compra_real = max(0, qtd_nec - tem_central)
+            
+            if compra_real > 0:
+                # Pega dados do cadastro
+                forn = df_cen.loc[prod, 'Fornecedor'] if prod in df_cen.index else "Geral"
+                cust = df_cen.loc[prod, 'Custo_Unit'] if prod in df_cen.index else 0
+                lista_final.append({'Produto': prod, 'Fornecedor': forn, 'Custo_Unit': cust, 'Qtd': compra_real})
+        
+        if lista_final:
+            st.session_state['df_compras_temp'] = pd.DataFrame(lista_final).sort_values('Fornecedor')
+            st.success("Sugestão baseada nos Mínimos Gerada!")
+        else:
+            st.info("Estoques acima do mínimo ou Central cobre tudo.")
+
     if st.session_state['df_compras_temp'] is None:
+        st.info("Clique no botão acima ou comece manual.")
         base = df_geral[df_geral['Loja']=="Estoque Central"][['Produto','Fornecedor','Custo_Unit']].copy()
         base = base.drop_duplicates('Produto').sort_values('Produto')
         base['Qtd'] = 0 
         st.session_state['df_compras_temp'] = base
     
-    if 'Qtd' not in st.session_state['df_compras_temp'].columns: st.session_state['df_compras_temp'] = None; st.rerun()
-
     view = st.session_state['df_compras_temp']
     f_list = ["Todos"] + sorted(view['Fornecedor'].unique().tolist())
     sel = st.selectbox("Fornecedor", f_list)
@@ -313,21 +415,14 @@ elif modo == "🛒 Compras":
     
     total_ped = ed['Total'].sum()
     st.metric("Total", f"R$ {total_ped:,.2f}")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("📄 Baixar Pedido PDF"):
-            i = st.session_state['df_compras_temp'].copy(); i['Total'] = i['Qtd'] * i['Custo_Unit']; i = i[i['Qtd']>0]
-            if not i.empty:
-                pdf_bytes = criar_pdf_generico(i[['Produto','Fornecedor','Qtd','Total']], "PEDIDO DE COMPRA", [90,50,20,30])
-                st.download_button("Clique para Baixar PDF", pdf_bytes, "Pedido.pdf", "application/pdf")
-                registrar_log("Vários", len(i), "Compra", f"R$ {total_ped:.2f}")
-            else: st.warning("Vazio")
-    with c2:
-        i_xls = st.session_state['df_compras_temp'].copy(); i_xls['Total'] = i_xls['Qtd'] * i_xls['Custo_Unit']; i_xls = i_xls[i_xls['Qtd']>0]
-        if not i_xls.empty:
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: i_xls[['Produto','Fornecedor','Qtd','Total']].to_excel(writer, index=False, sheet_name='Pedido')
-            st.download_button("📊 Baixar Pedido Excel", buffer.getvalue(), "Pedido_Compra.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+    if st.button("Baixar Pedido PDF"):
+        i = st.session_state['df_compras_temp'].copy(); i['Total'] = i['Qtd'] * i['Custo_Unit']; i = i[i['Qtd']>0]
+        if not i.empty:
+            pdf_bytes = criar_pdf_generico(i[['Produto','Fornecedor','Qtd','Total']], "PEDIDO DE COMPRA", [90,50,20,30])
+            st.download_button("Clique para Baixar PDF", pdf_bytes, "Pedido.pdf", "application/pdf")
+            registrar_log("Vários", len(i), "Compra", f"R$ {total_ped:.2f}")
+        else: st.warning("Vazio")
 
 elif modo == "Estoque Central":
     if st.session_state['distribuicao_concluida']:
@@ -337,38 +432,59 @@ elif modo == "Estoque Central":
         if st.button("Voltar"): resetar_processos(); st.rerun()
     else:
         st.subheader("Distribuição")
-        with st.expander("Ajuste Manual"):
-            p = st.selectbox("Prod", df_geral[df_geral['Loja']==modo]['Produto'].unique())
-            q = st.number_input("Qtd", 1.0)
-            c1, c2 = st.columns(2)
-            if c1.button("Entrada"):
-                idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
-                df_geral.loc[idx, 'Estoque_Atual'] += q
-                salvar_dados(df_geral); registrar_log(p, q, "Entrada", "Man"); st.success("Ok"); st.rerun()
-            if c2.button("Baixa"):
-                idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
-                cur = df_geral.loc[idx, 'Estoque_Atual'].values[0]
-                df_geral.loc[idx, 'Estoque_Atual'] = max(0, cur-q)
-                salvar_dados(df_geral); registrar_log(p, q, "Baixa", "Man"); st.success("Ok"); st.rerun()
+        search = st.text_input("Buscar", placeholder="Nome ou Código...")
         
-        search = st.text_input("Buscar", placeholder="Nome...")
+        # Inicializa se vazio
         if st.session_state['df_distribuicao_temp'] is None:
-            df_b = df_geral[df_geral['Loja']==modo][['Produto','Estoque_Atual']].copy()
+            df_b = df_geral[df_geral['Loja']==modo][['Produto','Estoque_Atual', 'Padrao']].copy()
             df_b['Env SA'] = 0; df_b['Env SI'] = 0
-            for l, s in [("Hosp. Santo Amaro","SA"), ("Hosp. Santa Izabel","SI")]:
-                df_h = df_geral[df_geral['Loja']==l].set_index('Produto')
-                df_h = df_h[~df_h.index.duplicated(keep='first')]
-                df_b[f'Tem {s}'] = df_b['Produto'].map(df_h['Estoque_Atual']).fillna(0)
-                df_b[f'Med {s}'] = df_b['Produto'].map(df_h['Media_Vendas_Semana']).fillna(0)
+            
+            # Traz dados dos hospitais
+            df_sa = df_geral[df_geral['Loja']=="Hosp. Santo Amaro"].set_index('Produto')
+            df_si = df_geral[df_geral['Loja']=="Hosp. Santa Izabel"].set_index('Produto')
+            
+            # Mapeia Tem e Minimo (Meta)
+            df_b['Tem SA'] = df_b['Produto'].map(df_sa['Estoque_Atual']).fillna(0)
+            df_b['Meta SA'] = df_b['Produto'].map(df_sa['Min_SA']).fillna(0)
+            
+            df_b['Tem SI'] = df_b['Produto'].map(df_si['Estoque_Atual']).fillna(0)
+            df_b['Meta SI'] = df_b['Produto'].map(df_si['Min_SI']).fillna(0)
+            
             st.session_state['df_distribuicao_temp'] = df_b
             
         df_w = st.session_state['df_distribuicao_temp']
-        df_view = df_w[df_w['Produto'].str.contains(search, case=False, na=False)].copy() if search else df_w.sort_values('Estoque_Atual', ascending=False).head(50).copy()
+        
+        # Filtro de Busca (Nome ou Código)
+        if search:
+            mask_busca = (
+                df_w['Produto'].str.contains(search, case=False, na=False) 
+                # Se tivermos as colunas de código no futuro aqui, adicionamos
+            )
+            df_view = df_w[mask_busca].copy()
+        else:
+            # Prioriza mostrar quem está abaixo do mínimo
+            df_view = df_w.sort_values('Estoque_Atual', ascending=False).head(50).copy()
         
         df_view['Saldo'] = df_view['Estoque_Atual'] - df_view['Env SA'] - df_view['Env SI']
-        cols = ['Produto', 'Estoque_Atual', 'Saldo', 'Tem SA', 'Med SA', 'Env SA', 'Tem SI', 'Med SI', 'Env SI']
         
-        ed = st.data_editor(df_view[cols], column_config={"Estoque_Atual": st.column_config.NumberColumn(disabled=True), "Saldo": st.column_config.NumberColumn(disabled=True), "Tem SA": st.column_config.NumberColumn(disabled=True), "Med SA": st.column_config.NumberColumn(disabled=True), "Tem SI": st.column_config.NumberColumn(disabled=True), "Med SI": st.column_config.NumberColumn(disabled=True)}, use_container_width=True, height=500)
+        # Colunas visuais
+        cols = ['Produto', 'Padrao', 'Estoque_Atual', 'Saldo', 'Tem SA', 'Meta SA', 'Env SA', 'Tem SI', 'Meta SI', 'Env SI']
+        
+        ed = st.data_editor(
+            df_view[cols], 
+            column_config={
+                "Estoque_Atual": st.column_config.NumberColumn("Central", disabled=True),
+                "Padrao": st.column_config.TextColumn("Emb.", disabled=True, width="small"),
+                "Saldo": st.column_config.NumberColumn("Restante", disabled=True),
+                "Tem SA": st.column_config.NumberColumn("🏠 Tem SA", disabled=True, format="%.0f"),
+                "Meta SA": st.column_config.NumberColumn("🎯 Min SA", disabled=True, format="%.0f"), 
+                "Env SA": st.column_config.NumberColumn("➡️ Enviar SA", min_value=0),
+                "Tem SI": st.column_config.NumberColumn("🏠 Tem SI", disabled=True, format="%.0f"),
+                "Meta SI": st.column_config.NumberColumn("🎯 Min SI", disabled=True, format="%.0f"),
+                "Env SI": st.column_config.NumberColumn("➡️ Enviar SI", min_value=0)
+            }, 
+            use_container_width=True, height=500
+        )
         
         if not ed.equals(df_view[cols]):
             ed.set_index('Produto', inplace=True); df_w.set_index('Produto', inplace=True)
@@ -386,14 +502,17 @@ elif modo == "Estoque Central":
                     idx = df_geral[(df_geral['Loja']==modo)&(df_geral['Produto']==p)].index
                     if not idx.empty:
                         df_geral.loc[idx, 'Estoque_Atual'] -= (sa+si)
-                        for l, q, s in [("Hosp. Santo Amaro", sa, "SA"), ("Hosp. Santa Izabel", si, "SI")]:
+                        for l, q, meta_col in [("Hosp. Santo Amaro", sa, "Meta SA"), ("Hosp. Santa Izabel", si, "Meta SI")]:
                             if q>0:
                                 idl = (df_geral['Loja']==l)&(df_geral['Produto']==p)
                                 if idl.any(): df_geral.loc[idl, 'Estoque_Atual'] += q
                                 else:
-                                    n = df_geral.loc[idx].iloc[0].copy(); n['Loja']=l; n['Estoque_Atual']=q; n['Media_Vendas_Semana']=r.get(f'Med {s}',0)
+                                    n = df_geral.loc[idx].iloc[0].copy(); n['Loja']=l; n['Estoque_Atual']=q
+                                    # Leva o Minimo/Meta junto se for novo
+                                    if l == "Hosp. Santo Amaro": n['Min_SA'] = r.get('Meta SA', 0)
+                                    if l == "Hosp. Santa Izabel": n['Min_SI'] = r.get('Meta SI', 0)
                                     df_geral = pd.concat([df_geral, pd.DataFrame([n])], ignore_index=True)
-                        rom.append({"Produto":p, "Env SA":sa, "Env SI":si})
+                        rom.append({"Produto":p, "Padrao": r['Padrao'], "Env SA":sa, "Env SI":si})
                         registrar_log(p, sa+si, "Transferência", f"SA:{sa} SI:{si}")
                 salvar_dados(df_geral)
                 pdf = criar_pdf_generico(pd.DataFrame(rom), "ROMANEIO")
@@ -409,9 +528,9 @@ else:
     if not df_l.empty:
         renderizar_baixa_por_arquivo(df_geral, modo)
         
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine='openpyxl') as writer: df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']].to_excel(writer, index=False, sheet_name='Estoque')
-        st.download_button(f"📊 Baixar Estoque {modo} (.xlsx)", buf.getvalue(), f"Estoque_{modo}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # Define qual mínimo mostrar na tabela da loja
+        col_min = 'Min_SA' if "Amaro" in modo else 'Min_SI'
         
-        st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
+        # Exibe tabela com a coluna "Mínimo" (Meta)
+        st.dataframe(df_l[['Produto', 'Estoque_Atual', col_min, 'Fornecedor']], use_container_width=True)
     else: st.info("Vazio")
