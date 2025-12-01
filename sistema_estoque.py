@@ -3,9 +3,10 @@ import pandas as pd
 import os
 from datetime import datetime
 from fpdf import FPDF
+import io
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Gestão 4.2 (Estoque)", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema 30.2 (Auto-Cadastro)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 
 # --- 1. BANCO DE DADOS ---
@@ -38,7 +39,7 @@ def limpar_numero(valor):
 st.markdown("<h2 style='text-align: center; color: #2E86C1;'>Sistema de Gestão Hospitalar</h2>", unsafe_allow_html=True)
 st.markdown("---")
 
-if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Estoque" # Começa no Estoque agora
+if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Estoque"
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
@@ -57,13 +58,12 @@ botao(c6, "Sugestões", "💡", "Sugestoes")
 
 st.markdown("---")
 
-# --- 3. TELA DE ESTOQUE (A NOVIDADE) ---
+# --- 3. TELA DE ESTOQUE (COM AUTO-CADASTRO) ---
 if st.session_state['tela_atual'] == "Estoque":
     st.header("📦 Atualização de Estoque (Contagem)")
     
     df_db = carregar_dados()
     
-    # Seletor de Local (Para saber onde salvar a quantidade)
     locais = {
         "Depósito Geral (Central)": "Estoque_Central",
         "Hospital Santo Amaro": "Estoque_SA",
@@ -75,13 +75,13 @@ if st.session_state['tela_atual'] == "Estoque":
     coluna_destino = locais[local_selecionado]
     
     with st.container(border=True):
-        st.info(f"Suba a planilha de contagem do **{local_selecionado}**. O sistema buscará primeiro pelo Código, depois pelo Nome.")
+        st.info(f"Suba a planilha do **{local_selecionado}**. Se o produto não existir, ele será cadastrado automaticamente como 'Novo'.")
         
         arquivo = st.file_uploader("Arquivo de Contagem", type=["xlsx", "csv"], key="up_estoque")
         
         if arquivo:
             try:
-                # 1. Detecção Inteligente de Cabeçalho (igual fizemos antes)
+                # 1. Detecção Cabeçalho
                 if arquivo.name.endswith('.csv'): df_temp = pd.read_csv(arquivo, header=None)
                 else: df_temp = pd.read_excel(arquivo, header=None)
                 
@@ -96,13 +96,13 @@ if st.session_state['tela_atual'] == "Estoque":
                 if arquivo.name.endswith('.csv'): df_new = pd.read_csv(arquivo, header=header_row)
                 else: df_new = pd.read_excel(arquivo, header=header_row)
                 
-                # 2. Seleção de Colunas
+                # 2. Seleção Colunas
                 cols = df_new.columns.tolist()
                 c1, c2, c3 = st.columns(3)
                 
                 i_cod = next((i for i, c in enumerate(cols) if "cod" in str(c).lower()), 0)
                 i_nom = next((i for i, c in enumerate(cols) if "nom" in str(c).lower() or "prod" in str(c).lower()), 0)
-                i_qtd = next((i for i, c in enumerate(cols) if "qtd" in str(c).lower() or "saldo" in str(c).lower() or "fisico" in str(c).lower()), 0)
+                i_qtd = next((i for i, c in enumerate(cols) if "qtd" in str(c).lower() or "saldo" in str(c).lower()), 0)
                 
                 col_codigo = c1.selectbox("Coluna Código", cols, index=i_cod)
                 col_nome = c2.selectbox("Coluna Nome", cols, index=i_nom)
@@ -110,90 +110,99 @@ if st.session_state['tela_atual'] == "Estoque":
                 
                 if st.button("🚀 Processar Contagem"):
                     atualizados = 0
-                    nao_encontrados = []
+                    novos_cadastrados = []
                     
-                    # Barra de progresso para dar feedback visual
                     bar = st.progress(0)
                     total_rows = len(df_new)
                     
                     for i, r in df_new.iterrows():
-                        # Atualiza barra
                         bar.progress((i + 1) / total_rows)
                         
-                        # Dados da planilha
                         cod_planilha = str(r[col_codigo]).strip()
+                        if cod_planilha == 'nan': cod_planilha = ""
+                        
                         nome_planilha = str(r[col_nome]).strip()
+                        if not nome_planilha or nome_planilha == 'nan': continue
+                        
                         qtd_planilha = limpar_numero(r[col_qtd])
                         
                         match = pd.DataFrame()
                         
-                        # --- ESTRATÉGIA 1: BUSCA POR CÓDIGO ---
-                        if cod_planilha and cod_planilha != 'nan':
-                            # Tenta bater com 'Codigo' ou 'Codigo_Unico' do banco
-                            match = df_db[
-                                (df_db['Codigo'] == cod_planilha) | 
-                                (df_db['Codigo_Unico'] == cod_planilha)
-                            ]
+                        # A) Busca por Código
+                        if cod_planilha:
+                            match = df_db[(df_db['Codigo'] == cod_planilha) | (df_db['Codigo_Unico'] == cod_planilha)]
                         
-                        # --- ESTRATÉGIA 2: BUSCA POR NOME (SE NÃO ACHOU POR CÓDIGO) ---
-                        if match.empty and nome_planilha and nome_planilha != 'nan':
+                        # B) Busca por Nome
+                        if match.empty:
                             match = df_db[df_db['Produto'] == nome_planilha]
                             
-                        # --- RESULTADO ---
+                        # C) Lógica de Atualização ou Criação
                         if not match.empty:
-                            # Pega o primeiro índice encontrado
                             idx = match.index[0]
-                            # Atualiza a coluna do local selecionado
                             df_db.at[idx, coluna_destino] = qtd_planilha
                             atualizados += 1
                         else:
-                            # Log de erro para você saber o que não bateu
-                            identificador = cod_planilha if cod_planilha and cod_planilha != 'nan' else nome_planilha
-                            if identificador and identificador != 'nan':
-                                nao_encontrados.append(f"{identificador} (Qtd: {qtd_planilha})")
+                            # PRODUTO NOVO! CRIAR!
+                            novo_item = {
+                                "Codigo": cod_planilha,
+                                "Codigo_Unico": "",
+                                "Produto": nome_planilha,
+                                "Produto_Alt": "",
+                                "Categoria": "Novos/Indefinido", # Marca para revisar depois
+                                "Fornecedor": "A Definir",
+                                "Padrao": "Un",
+                                "Custo": 0.0,
+                                "Min_SA": 0.0, "Min_SI": 0.0,
+                                "Estoque_Central": 0, "Estoque_SA": 0, "Estoque_SI": 0
+                            }
+                            # Define o estoque no local correto
+                            novo_item[coluna_destino] = qtd_planilha
+                            
+                            df_db = pd.concat([df_db, pd.DataFrame([novo_item])], ignore_index=True)
+                            novos_cadastrados.append(nome_planilha)
                     
-                    bar.empty() # Limpa barra
+                    bar.empty()
                     salvar_banco(df_db)
                     
-                    # Relatório Final
-                    st.success(f"✅ Concluído! {atualizados} produtos atualizados em {local_selecionado}.")
+                    st.success(f"✅ Processo Finalizado!")
+                    st.markdown(f"**Atualizados:** {atualizados}")
                     
-                    if nao_encontrados:
-                        with st.expander(f"⚠️ {len(nao_encontrados)} Produtos não encontrados no cadastro (Verifique):"):
-                            st.write(nao_encontrados)
+                    if novos_cadastrados:
+                        st.warning(f"⚠️ **{len(novos_cadastrados)} Produtos Novos Cadastrados Automaticamente!**")
+                        st.info("Eles foram salvos na categoria 'Novos/Indefinido'. Vá na aba **Produtos** para preencher Custo e Fornecedor.")
+                        with st.expander("Ver lista de novos produtos"):
+                            st.write(novos_cadastrados)
                             
             except Exception as e:
                 st.error(f"Erro ao processar: {e}")
 
-    # --- VISUALIZAÇÃO DO ESTOQUE ATUAL ---
+    # --- VISUALIZAÇÃO ---
     st.divider()
-    st.markdown(f"### 🔎 Visão Atual do Estoque")
+    st.markdown(f"### 🔎 Visão do Estoque: {local_selecionado}")
     
-    # Filtro rápido
     filtro = st.text_input("Filtrar produto:", placeholder="Digite o nome...")
-    
     df_view = df_db.copy()
     if filtro:
         df_view = df_view[df_view['Produto'].str.contains(filtro, case=False, na=False)]
         
-    # Mostra tabela focada no estoque
     st.dataframe(
-        df_view[['Codigo', 'Produto', 'Padrao', 'Estoque_Central', 'Estoque_SA', 'Estoque_SI']],
+        df_view[['Codigo', 'Produto', 'Categoria', 'Padrao', coluna_destino]],
         use_container_width=True,
         hide_index=True
     )
 
-# --- OUTRAS TELAS (MANTER IGUAL POR ENQUANTO) ---
+# --- TELA PRODUTOS (MANTIDA IGUAL PARA SUPORTE) ---
 elif st.session_state['tela_atual'] == "Produtos":
-    # (Código da Parte 2 que já fizemos - MANTIDO RESUMIDO AQUI PRA NÃO FICAR GIGANTE O TEXTO, MAS COPIE O ANTERIOR SE PRECISAR)
-    # Vou colar o código completo da tela de Produtos abaixo para garantir que nada se perca
     st.header("📋 Cadastro Geral de Produtos")
     df_db = carregar_dados()
-    with st.expander("📂 Importar Cadastro", expanded=True):
+    
+    # Upload Mestre
+    with st.expander("📂 Importar Planilha de Cadastro/Atualização"):
         c_upl, c_cat = st.columns([2, 1])
-        arquivo = c_upl.file_uploader("Arquivo Excel/CSV", type=["xlsx", "csv"], key="up_prod")
-        categoria_escolhida = c_cat.selectbox("Categoria:", ["Café", "Perecíveis", "Geral"])
-        if arquivo and c_upl.button("Processar"):
+        arquivo = c_upl.file_uploader("Arquivo Excel/CSV", type=["xlsx", "csv"])
+        categoria_escolhida = c_cat.selectbox("Definir categoria como:", ["Café", "Perecíveis", "Geral"])
+        
+        if arquivo and c_upl.button("🚀 Processar Cadastro"):
             try:
                 if arquivo.name.endswith('.csv'): df_new = pd.read_csv(arquivo)
                 else: df_new = pd.read_excel(arquivo)
@@ -203,14 +212,14 @@ elif st.session_state['tela_atual'] == "Produtos":
                         if any(x in c.lower() for x in k): return c
                     return None
                 c_cod = find(['código', 'codigo'])
-                c_nome1 = find(['produto 1', 'nome produto'])
+                c_nome1 = find(['produto 1', 'nome produto', 'descrição'])
                 c_forn = find(['fornecedor'])
                 c_padr = find(['padrão', 'padrao'])
                 c_cust = find(['custo', 'unitário'])
                 c_msa = find(['santo amaro', 'st amaro'])
                 c_msi = find(['santa izabel', 'st izabel'])
                 
-                if not c_nome1: st.error("Coluna Nome não encontrada.")
+                if not c_nome1: st.error("Erro: Coluna Nome não encontrada.")
                 else:
                     cnt = 0
                     for i, r in df_new.iterrows():
@@ -230,34 +239,35 @@ elif st.session_state['tela_atual'] == "Produtos":
                         if mask.any():
                             for k, v in dados.items(): df_db.loc[mask, k] = v
                         else:
-                            dados.update({"Estoque_Central":0, "Estoque_SA":0, "Estoque_SI":0})
+                            dados.update({"Estoque_Central": 0, "Estoque_SA": 0, "Estoque_SI": 0})
                             df_db = pd.concat([df_db, pd.DataFrame([dados])], ignore_index=True)
                         cnt += 1
                     salvar_banco(df_db); st.success(f"{cnt} processados!"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
+
+    # Visualização
     st.divider()
-    aba1, aba2, aba3 = st.tabs(["☕ Café", "🍎 Perecíveis", "📋 Todos"])
-    def mostrar_tabela(cat):
-        df_show = df_db if cat == "Todos" else df_db[df_db['Categoria'] == cat]
+    aba1, aba2, aba3, aba4 = st.tabs(["☕ Café", "🍎 Perecíveis", "🆕 Novos/Indefinido", "📋 Todos"])
+    
+    def mostrar_tabela(cat_filtro):
+        if cat_filtro == "Todos": df_show = df_db
+        else: df_show = df_db[df_db['Categoria'] == cat_filtro].copy()
+            
         if not df_show.empty:
-            st.dataframe(df_show[["Codigo", "Produto", "Fornecedor", "Padrao", "Custo"]], use_container_width=True, hide_index=True)
+            st.dataframe(df_show[["Codigo", "Produto", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI"]], use_container_width=True, hide_index=True)
             c_del1, c_del2 = st.columns([4, 1])
-            p_del = c_del1.selectbox(f"Excluir ({cat}):", df_show['Produto'], key=f"d_{cat}", index=None)
-            if p_del and c_del2.button("🗑️", key=f"b_{cat}"):
-                salvar_banco(df_db[df_db['Produto'] != p_del]); st.rerun()
-        else: st.info("Vazio.")
+            p_del = c_del1.selectbox(f"Excluir de {cat_filtro}:", df_show['Produto'], key=f"d_{cat_filtro}", index=None)
+            if p_del and c_del2.button("🗑️", key=f"b_{cat_filtro}"):
+                df_db = df_db[df_db['Produto'] != p_del]; salvar_banco(df_db); st.rerun()
+        else: st.info("Sem itens.")
+
     with aba1: mostrar_tabela("Café")
     with aba2: mostrar_tabela("Perecíveis")
-    with aba3: mostrar_tabela("Todos")
+    with aba3: mostrar_tabela("Novos/Indefinido") # ABA NOVA PARA OS AUTO-CADASTRADOS
+    with aba4: mostrar_tabela("Todos")
 
-elif st.session_state['tela_atual'] == "Transferencia":
-    st.title("🚚 Transferência"); st.info("Em breve...")
-
-elif st.session_state['tela_atual'] == "Compras":
-    st.title("🛒 Compras"); st.info("Em breve...")
-
-elif st.session_state['tela_atual'] == "Vendas":
-    st.title("📉 Vendas"); st.info("Em breve...")
-
-elif st.session_state['tela_atual'] == "Sugestoes":
-    st.title("💡 Sugestões"); st.info("Em breve...")
+# --- ROTEAMENTO OUTRAS TELAS ---
+elif st.session_state['tela_atual'] == "Transferencia": st.title("🚚 Transferência"); st.info("Em breve...")
+elif st.session_state['tela_atual'] == "Compras": st.title("🛒 Compras"); st.info("Em breve...")
+elif st.session_state['tela_atual'] == "Vendas": st.title("📉 Vendas"); st.info("Em breve...")
+elif st.session_state['tela_atual'] == "Sugestoes": st.title("💡 Sugestões"); st.info("Em breve...")
