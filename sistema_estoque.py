@@ -10,9 +10,9 @@ ARQUIVO_DADOS = 'estoque_completo.csv'
 ARQUIVO_LOG = 'historico_log.csv'
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-st.set_page_config(page_title="Sistema 27.5 (Excel Lojas)", layout="wide")
+st.set_page_config(page_title="Sistema 27.6 (Smart Upload)", layout="wide")
 
-# --- INICIALIZAÇÃO DE ESTADO ---
+# --- INICIALIZAÇÃO ---
 def init_state():
     keys = ['df_distribuicao_temp', 'df_compras_temp', 'romaneio_final', 'romaneio_pdf_cache', 
             'distribuicao_concluida', 'pedido_compra_final', 'selecao_exclusao']
@@ -23,18 +23,36 @@ def init_state():
 
 init_state()
 
-# --- FUNÇÕES DE DADOS ---
+# --- FUNÇÃO DE LIMPEZA DE NÚMEROS (NOVO) ---
+def limpar_numero(valor):
+    """Transforma '10,5 kg', 'R$ 10.00' ou '10' em número puro"""
+    if pd.isna(valor): return 0
+    if isinstance(valor, (int, float)): return valor
+    
+    # Remove textos comuns e espaços
+    v = str(valor).lower().replace('r$', '').replace('kg', '').replace('un', '').replace(' ', '')
+    
+    # Tratamento de pontuação (Brasil vs EUA)
+    if ',' in v and '.' in v: 
+        v = v.replace('.', '').replace(',', '.') # Ex: 1.000,50 -> 1000.50
+    else:
+        v = v.replace(',', '.') # Ex: 10,5 -> 10.5
+        
+    try: return float(v)
+    except: return 0
+
+# --- DADOS ---
 @st.cache_data
 def carregar_dados_cache():
-    colunas_padrao = ["Loja", "Produto", "Estoque_Atual", "Media_Vendas_Semana", "Ultima_Atualizacao", "Fornecedor", "Custo_Unit"]
-    if not os.path.exists(ARQUIVO_DADOS): return pd.DataFrame(columns=colunas_padrao)
+    colunas = ["Loja", "Produto", "Estoque_Atual", "Media_Vendas_Semana", "Ultima_Atualizacao", "Fornecedor", "Custo_Unit"]
+    if not os.path.exists(ARQUIVO_DADOS): return pd.DataFrame(columns=colunas)
     try: df = pd.read_csv(ARQUIVO_DADOS)
-    except: return pd.DataFrame(columns=colunas_padrao)
+    except: return pd.DataFrame(columns=colunas)
     
-    for col in ["Estoque_Atual", "Media_Vendas_Semana", "Custo_Unit"]:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        else: df[col] = 0
-            
+    for c in ["Estoque_Atual", "Media_Vendas_Semana", "Custo_Unit"]:
+        if c in df.columns: df[c] = df[c].apply(limpar_numero)
+        else: df[c] = 0
+    
     if "Fornecedor" not in df.columns: df["Fornecedor"] = "Geral"
     df["Fornecedor"] = df["Fornecedor"].fillna("Geral").astype(str)
     
@@ -49,11 +67,10 @@ def salvar_dados(df):
     carregar_dados_cache.clear()
 
 def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
-    novo_log = {"Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Produto": produto, "Quantidade": quantidade, "Tipo": tipo, "Detalhe": origem_destino, "Usuario": usuario}
-    if not os.path.exists(ARQUIVO_LOG): df_log = pd.DataFrame(columns=["Data", "Produto", "Quantidade", "Tipo", "Detalhe", "Usuario"])
-    else: df_log = pd.read_csv(ARQUIVO_LOG)
-    df_log = pd.concat([df_log, pd.DataFrame([novo_log])], ignore_index=True)
-    df_log.to_csv(ARQUIVO_LOG, index=False)
+    novo = {"Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Produto": produto, "Quantidade": quantidade, "Tipo": tipo, "Detalhe": origem_destino, "Usuario": usuario}
+    if not os.path.exists(ARQUIVO_LOG): df = pd.DataFrame(columns=["Data", "Produto", "Quantidade", "Tipo", "Detalhe", "Usuario"])
+    else: df = pd.read_csv(ARQUIVO_LOG)
+    pd.concat([df, pd.DataFrame([novo])], ignore_index=True).to_csv(ARQUIVO_LOG, index=False)
 
 # --- PDF ---
 def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
@@ -67,27 +84,25 @@ def criar_pdf_generico(dataframe, titulo_doc, colunas_largura=None):
         pdf.ln(5)
         cols = dataframe.columns.tolist()
         if not colunas_largura:
-            largura_base = 190 // len(cols)
-            larguras = [largura_base] * len(cols)
-            if "Produto" in cols: idx = cols.index("Produto"); larguras[idx] = 80 
+            l = 190 // len(cols)
+            larguras = [l] * len(cols)
+            if "Produto" in cols: larguras[cols.index("Produto")] = 80
         else: larguras = colunas_largura
         pdf.set_font("Arial", 'B', 9)
-        for i, col in enumerate(cols):
+        for i, col in enumerate(cols): 
             txt = str(col).encode('latin-1', 'replace').decode('latin-1')
             pdf.cell(larguras[i], 10, txt[:20], 1, 0, 'C')
         pdf.ln()
         pdf.set_font("Arial", size=9)
         for index, row in dataframe.iterrows():
             for i, col in enumerate(cols):
-                valor = str(row[col])
-                texto = valor.encode('latin-1', 'replace').decode('latin-1')
-                align = 'L' if i == 0 else 'C'
-                pdf.cell(larguras[i], 10, texto[:45], 1, 0, align)
+                txt = str(row[col]).encode('latin-1', 'replace').decode('latin-1')
+                align = 'L' if i==0 else 'C'
+                pdf.cell(larguras[i], 10, txt[:45], 1, 0, align)
             pdf.ln()
         return pdf.output(dest='S').encode('latin-1', 'replace')
     except Exception as e: return str(e).encode('utf-8')
 
-# --- MÉTODOS AUXILIARES ---
 def resetar_processos():
     for k in ['df_distribuicao_temp', 'romaneio_final', 'df_compras_temp', 'pedido_compra_final', 'romaneio_pdf_cache']:
         st.session_state[k] = None
@@ -126,16 +141,15 @@ def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
                 st.write("Confirme as colunas:")
                 c1, c2 = st.columns(2)
                 cols = df_vendas.columns.tolist()
-                idx_n = next((i for i, c in enumerate(cols) if "nome" in c.lower() or "prod" in c.lower()), 0)
-                idx_q = next((i for i, c in enumerate(cols) if "qtd" in c.lower()), 0)
+                idx_n = next((i for i, c in enumerate(cols) if "nome" in c.lower() or "prod" in c.lower() or "desc" in c.lower()), 0)
+                idx_q = next((i for i, c in enumerate(cols) if "qtd" in c.lower() or "quant" in c.lower()), 0)
                 cn = c1.selectbox("Coluna Produto", cols, index=idx_n)
                 cq = c2.selectbox("Coluna Qtd", cols, index=idx_q)
                 if st.button("🚀 Processar Baixa"):
                     suc = 0; err = []
                     for i, r in df_vendas.iterrows():
                         p = str(r[cn]).strip()
-                        try: q = float(r[cq])
-                        except: q = 0
+                        q = limpar_numero(r[cq]) # Usa o limpador aqui também
                         if q > 0:
                             mask = (df_geral['Loja'] == loja_selecionada) & (df_geral['Produto'] == p)
                             if mask.any():
@@ -150,7 +164,7 @@ def renderizar_baixa_por_arquivo(df_geral, loja_selecionada):
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- INTERFACE ---
-st.title("🚀 Sistema Integrado 27.5")
+st.title("🚀 Sistema Integrado 27.6 (Smart Upload)")
 df_geral = carregar_dados_cache()
 
 with st.sidebar:
@@ -164,17 +178,27 @@ with st.sidebar:
             if f:
                 try:
                     df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
+                    
+                    # --- AUTO-MAPA INTELIGENTE ---
                     mapa = {}
                     for c in df.columns:
                         cl = c.lower()
-                        if "prod" in c: mapa[c] = "Produto"
-                        elif "est" in c or "qtd" in c: mapa[c] = "Estoque_Atual"
+                        if "prod" in cl or "nome" in cl or "item" in cl: mapa[c] = "Produto"
+                        elif any(x in cl for x in ['est', 'qtd', 'quant', 'saldo', 'contagem', 'total']): mapa[c] = "Estoque_Atual"
                         elif "med" in cl: mapa[c] = "Media_Vendas_Semana"
+                    
                     df = df.rename(columns=mapa)
+                    
                     if "Produto" in df.columns:
-                        if "Estoque_Atual" not in df.columns: df["Estoque_Atual"]=0
-                        if "Media_Vendas_Semana" not in df.columns: df["Media_Vendas_Semana"]=0
+                        if "Estoque_Atual" in df.columns:
+                            # Aplica a limpeza nos números
+                            df["Estoque_Atual"] = df["Estoque_Atual"].apply(limpar_numero)
+                        else: df["Estoque_Atual"] = 0
+                            
+                        if "Media_Vendas_Semana" not in df.columns: df["Media_Vendas_Semana"] = 0
+                        
                         df["Loja"] = modo; df["Ultima_Atualizacao"] = datetime.now().strftime("%d/%m %H:%M")
+                        
                         ant = df_geral[df_geral['Loja']==modo].set_index('Produto')
                         ant = ant[~ant.index.duplicated(keep='first')]
                         df = df.set_index('Produto')
@@ -182,10 +206,12 @@ with st.sidebar:
                             df['Fornecedor'] = df.index.map(ant['Fornecedor']).fillna("Geral")
                             df['Custo_Unit'] = df.index.map(ant['Custo_Unit']).fillna(0)
                         else: df['Fornecedor']="Geral"; df['Custo_Unit']=0
+                        
                         out = df_geral[df_geral['Loja']!=modo]
                         salvar_dados(pd.concat([out, df.reset_index()], ignore_index=True))
                         resetar_processos(); st.success("Ok!"); st.rerun()
-                except: st.error("Erro")
+                    else: st.error("Não achei a coluna 'Produto' na planilha.")
+                except Exception as e: st.error(f"Erro: {e}")
 
     with st.expander("💲 Preços"):
         f = st.file_uploader("Arquivo", type=['csv', 'xlsx'], key="up")
@@ -197,8 +223,13 @@ with st.sidebar:
                     cl = c.lower()
                     if "prod" in cl: mapa[c] = "Produto"
                     elif "forn" in cl: mapa[c] = "Fornecedor"
-                    elif "cust" in cl or "pre" in cl: mapa[c] = "Custo_Unit"
-                df = df.rename(columns=mapa).drop_duplicates('Produto').set_index('Produto')
+                    elif any(x in cl for x in ['cust', 'pre', 'valor']): mapa[c] = "Custo_Unit"
+                df = df.rename(columns=mapa)
+                
+                # Limpeza Preços
+                if "Custo_Unit" in df.columns: df["Custo_Unit"] = df["Custo_Unit"].apply(limpar_numero)
+                
+                df = df.drop_duplicates('Produto').set_index('Produto')
                 g = df_geral.set_index('Produto')
                 if "Fornecedor" in df.columns: g.update(df[['Fornecedor']])
                 if "Custo_Unit" in df.columns: g.update(df[['Custo_Unit']])
@@ -362,18 +393,12 @@ else:
     if not df_l.empty:
         renderizar_baixa_por_arquivo(df_geral, modo)
         
-        # --- BOTÃO NOVO: BAIXAR ESTOQUE EXCEL ---
-        buffer_est = io.BytesIO()
-        with pd.ExcelWriter(buffer_est, engine='openpyxl') as writer:
+        # --- BOTÃO EXCEL LOJA ---
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
             df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']].to_excel(writer, index=False, sheet_name='Estoque')
-        
-        st.download_button(
-            label=f"📊 Baixar Estoque {modo} (.xlsx)",
-            data=buffer_est.getvalue(),
-            file_name=f"Estoque_{modo.replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        # ----------------------------------------
+        st.download_button(f"📊 Baixar Estoque {modo}", buf.getvalue(), f"Estoque_{modo}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # ------------------------
         
         st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
     else: st.info("Vazio")
