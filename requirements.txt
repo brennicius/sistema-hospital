@@ -1,6 +1,8 @@
 streamlit
 pandas
 plotly
-fpdf2
 openpyxl
+fpdf2
 streamlit-gsheets
+setuptools
+packaging
