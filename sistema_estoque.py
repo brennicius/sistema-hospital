@@ -6,30 +6,31 @@ import os
 from datetime import datetime
 import io
 
-# --- BLOCO DE SEGURANÇA DO PDF (MODIFICAÇÃO) ---
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="Sistema Online 39.1", layout="wide", initial_sidebar_state="collapsed")
+UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
+
+# --- BLOCO DE SEGURANÇA DO PDF (O SEGREDO) ---
 # Isso impede o sistema de quebrar se o FPDF não instalar
 try:
     from fpdf import FPDF
     PDF_ATIVO = True
 except ImportError:
     PDF_ATIVO = False
-    # Cria uma classe falsa para o código não dar erro
+    # Cria uma classe "fantasma" para o código não dar erro
     class FPDF:
         def add_page(self): pass
         def set_font(self, a, b, c): pass
         def cell(self, *args, **kwargs): pass
         def ln(self, *args): pass
         def set_fill_color(self, *args): pass
-        def output(self, dest): return b"Erro: PDF nao instalado no servidor."
-
-# --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Online 39.1", layout="wide", initial_sidebar_state="collapsed")
-UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
+        def output(self, dest): return b"Erro: PDF nao instalado."
 
 # --- CONEXÃO ---
+# O ttl=0 garante dados frescos sempre
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- INICIALIZAÇÃO ---
+# --- INICIALIZAÇÃO DE ESTADO ---
 def init_state():
     keys = ['df_distribuicao_temp', 'df_compras_temp', 'romaneio_final', 'romaneio_pdf_cache', 
             'distribuicao_concluida', 'pedido_compra_final', 'selecao_exclusao', 'carga_acumulada',
@@ -37,16 +38,15 @@ def init_state():
             'pedido_pdf', 'pedido_xlsx']
     for k in keys:
         if k not in st.session_state:
+            st.session_state[k] = None if 'df' in k or 'romaneio' in k or 'pedido' in k or 'cache' in k else []
             if 'ver' in k or 'key' in k: st.session_state[k] = 0
-            elif 'cache' in k or 'df' in k or 'pdf' in k or 'xlsx' in k or 'final' in k: st.session_state[k] = None
-            elif 'carga' in k or 'selecao' in k: st.session_state[k] = []
             elif 'concluida' in k: st.session_state[k] = False
             elif 'last' in k: st.session_state[k] = ""
     if 'tela_atual' not in st.session_state: st.session_state['tela_atual'] = "Estoque"
 
 init_state()
 
-# --- FUNÇÕES LIMPEZA ---
+# --- FUNÇÕES DE DADOS ---
 def limpar_numero(valor):
     if pd.isna(valor): return 0.0
     s = str(valor).lower().replace('r$', '').replace('kg', '').replace('un', '').replace(' ', '')
@@ -65,16 +65,17 @@ def limpar_codigo(valor):
     if s.endswith('.0'): return s[:-2]
     return s
 
-# --- DADOS (GOOGLE SHEETS) ---
 def carregar_dados():
     colunas_padrao = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
     try:
         df = conn.read(worksheet="Estoque", ttl=0)
         if df.empty or len(df.columns) < 2: return pd.DataFrame(columns=colunas_padrao)
+        # Garante colunas faltantes
         for c in colunas_padrao:
             if c not in df.columns: df[c] = 0 if c in ["Estoque_Central", "Custo"] else ""
     except: return pd.DataFrame(columns=colunas_padrao)
     
+    # Tipagem
     for col in ["Estoque_Central", "Estoque_SA", "Estoque_SI", "Min_SA", "Min_SI"]:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
     if "Custo" in df.columns: df["Custo"] = pd.to_numeric(df["Custo"], errors='coerce').fillna(0.0)
@@ -105,28 +106,9 @@ def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
         conn.update(worksheet="Historico", data=df_final)
     except: pass
 
-def calcular_cmv_mensal():
-    try:
-        df_l = carregar_log(); df_e = carregar_dados()
-        if df_l.empty or df_e.empty: return pd.DataFrame()
-        df_c = df_l[df_l['Tipo'].isin(['Baixa', 'Venda'])].copy()
-        if df_c.empty: return pd.DataFrame()
-        mapa = df_e.groupby('Produto')['Custo'].max()
-        df_c['Custo'] = df_c['Produto'].map(mapa).fillna(0)
-        df_c['Total'] = pd.to_numeric(df_c['Quantidade']) * df_c['Custo']
-        def loja(x):
-            x=str(x).lower()
-            if "amaro" in x: return "Sto Amaro"
-            if "izabel" in x: return "Sta Izabel"
-            if "central" in x: return "Central"
-            return "Outros"
-        df_c['Loja'] = df_c['Detalhe'].apply(loja)
-        return df_c.groupby('Loja')['Total'].sum().reset_index()
-    except: return pd.DataFrame()
-
-# --- PDF (FALSO OU VERDADEIRO) ---
+# --- PDF SEGURO ---
 def criar_pdf_unificado(lista_carga):
-    if not PDF_ATIVO: return b"PDF Indisponivel"
+    if not PDF_ATIVO: return None
     try:
         pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", 'B', 16)
         pdf.cell(190, 10, txt="ROMANEIO UNIFICADO", ln=True, align='C'); pdf.set_font("Arial", size=10)
@@ -143,10 +125,10 @@ def criar_pdf_unificado(lista_carga):
             qs = str(int(r["Hospital Santo Amaro"])) if r["Hospital Santo Amaro"]>0 else "-"; qi = str(int(r["Hospital Santa Izabel"])) if r["Hospital Santa Izabel"]>0 else "-"
             pdf.cell(110, 8, p, 1, 0, 'L'); pdf.cell(40, 8, qs, 1, 0, 'C'); pdf.cell(40, 8, qi, 1, 1, 'C')
         return pdf.output(dest='S').encode('latin-1', 'replace')
-    except: return b"Erro PDF"
+    except: return None
 
 def criar_pdf_pedido(dataframe, fornecedor, total):
-    if not PDF_ATIVO: return b"PDF Indisponivel"
+    if not PDF_ATIVO: return None
     try:
         pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", 'B', 16)
         pdf.cell(190, 10, txt=f"PEDIDO - {fornecedor.upper()}", ln=True, align='C'); pdf.set_font("Arial", size=10)
@@ -161,12 +143,12 @@ def criar_pdf_pedido(dataframe, fornecedor, total):
             pdf.cell(90, 8, p, 1, 0, 'L'); pdf.cell(30, 8, e, 1, 0, 'C'); pdf.cell(20, 8, str(q), 1, 0, 'C'); pdf.cell(25, 8, f"{c:.2f}", 1, 0, 'R'); pdf.cell(25, 8, f"{t:.2f}", 1, 1, 'R')
         pdf.ln(5); pdf.set_font("Arial", 'B', 12); pdf.cell(190, 10, txt=f"TOTAL: R$ {total:,.2f}", ln=True, align='R')
         return pdf.output(dest='S').encode('latin-1', 'replace')
-    except: return b"Erro PDF"
+    except: return None
 
 # --- MENU ---
 st.markdown("<h2 style='text-align: center; color: #2E86C1;'>Sistema de Gestão Hospitalar ☁️</h2>", unsafe_allow_html=True)
 st.markdown("---")
-if not PDF_ATIVO: st.warning("⚠️ Aviso: O gerador de PDF não foi instalado. O sistema funciona, mas o download de PDF estará desativado.")
+if not PDF_ATIVO: st.warning("⚠️ O módulo de PDF não foi carregado. Baixe em Excel.")
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 def botao(col, txt, ico, nome_t):
@@ -180,7 +162,7 @@ st.markdown("---")
 
 tela = st.session_state['tela_atual']
 try: df_db = carregar_dados()
-except: st.error("Erro ao conectar com Google Sheets. Verifique 'secrets.toml'."); st.stop()
+except: st.error("Erro ao conectar com Google Sheets. Verifique se compartilhou com o e-mail do robô."); st.stop()
 
 # --- PÁGINAS ---
 if tela == "Estoque":
@@ -211,7 +193,8 @@ if tela == "Estoque":
                     if not n or n=='nan': continue
                     m = df_db[(df_db['Codigo']==c)|(df_db['Codigo_Unico']==c)]
                     if m.empty: m = df_db[df_db['Produto']==n]
-                    if not m.empty: df_db.at[m.index[0], col_dest] = q; att+=1
+                    if not m.empty:
+                        df_db.at[m.index[0], col_dest] = q; att+=1
                     else:
                         nw = {"Codigo":c, "Produto":n, "Categoria":"Novo", "Fornecedor":"Geral", "Padrao":"Un", "Custo":0, "Min_SA":0, "Min_SI":0, "Estoque_Central":0, "Estoque_SA":0, "Estoque_SI":0}
                         nw[col_dest] = q; df_db = pd.concat([df_db, pd.DataFrame([nw])], ignore_index=True); novos.append(n)
@@ -251,7 +234,9 @@ elif tela == "Produtos":
                 salvar_banco(df_db); st.success(f"{cnt} ok!"); st.rerun()
             except: st.error("Erro arquivo")
     with st.expander("🔥 Reset"):
-        if st.button("ZERAR TUDO"): salvar_banco(pd.DataFrame(columns=df_db.columns)); st.success("Zerado!"); st.rerun()
+        if st.button("ZERAR TUDO"):
+            salvar_banco(pd.DataFrame(columns=df_db.columns))
+            st.success("Zerado!"); st.rerun()
     st.dataframe(df_db[['Codigo','Produto','Fornecedor','Custo','Min_SA','Min_SI']], use_container_width=True)
 
 elif tela == "Compras":
@@ -259,20 +244,22 @@ elif tela == "Compras":
     f_list = ["Todos"] + sorted([str(x) for x in df_db['Fornecedor'].unique() if str(x)!='nan'])
     sel = st.selectbox("Fornecedor", f_list)
     if sel != st.session_state.get('last_forn'): st.session_state['compras_df_cache']=None; st.session_state['last_forn']=sel
-    
     if st.button("🪄 Sugestão"):
         df_c = df_db.copy() if sel=="Todos" else df_db[df_db['Fornecedor']==sel].copy()
         df_c['Meta'] = df_c['Min_SA'] + df_c['Min_SI']
         df_c['Atual'] = df_c['Estoque_Central'] + df_c['Estoque_SA'] + df_c['Estoque_SI']
         df_c['Qtd Compra'] = (df_c['Meta'] - df_c['Atual']).apply(lambda x: max(0, int(x)))
         st.session_state['compras_df_cache'] = df_c; st.rerun()
-
     df_v = st.session_state['compras_df_cache'].copy() if st.session_state['compras_df_cache'] is not None else (df_db.copy() if sel=="Todos" else df_db[df_db['Fornecedor']==sel].copy())
     if 'Qtd Compra' not in df_v.columns: df_v['Qtd Compra'] = 0
     bus = st.text_input("Buscar:", "")
     if bus: df_v = df_v[df_v['Produto'].str.contains(bus, case=False, na=False)]
     df_v['Total'] = df_v['Qtd Compra'] * df_v['Custo']
     ed = st.data_editor(df_v[['Produto','Fornecedor','Custo','Qtd Compra','Total']], column_config={"Qtd Compra":st.column_config.NumberColumn(min_value=0, step=1, format="%d"), "Custo":st.column_config.NumberColumn(format="R$ %.2f", disabled=True), "Total":st.column_config.NumberColumn(format="R$ %.2f", disabled=True)}, use_container_width=True, height=500)
+    if not ed.equals(df_v):
+        df_v.set_index('Produto', inplace=True); ed.set_index('Produto', inplace=True)
+        df_v.update(ed); df_v.reset_index(inplace=True)
+        st.session_state['compras_df_cache'] = df_v; st.rerun()
     tot = ed['Total'].sum()
     st.metric("Total", f"R$ {tot:,.2f}")
     c1, c2 = st.columns(2)
@@ -283,6 +270,7 @@ elif tela == "Compras":
             b = io.BytesIO(); 
             with pd.ExcelWriter(b, engine='openpyxl') as w: i.to_excel(w, index=False)
             st.session_state['pedido_xlsx'] = b.getvalue()
+            registrar_log("Vários", len(i), "Compra", f"R$ {tot:.2f}")
             st.rerun()
     if st.session_state['pedido_pdf']:
         c1.download_button("Baixar PDF", st.session_state['pedido_pdf'], "Ped.pdf", "application/pdf")
@@ -325,9 +313,9 @@ elif tela == "Transferencia":
             c_b1, c_b2 = st.columns(2)
             if c_b1.button("✅ Finalizar"):
                 st.session_state['romaneio_pdf'] = criar_pdf_unificado(st.session_state['carga_acumulada'])
-                b = io.BytesIO(); 
-                with pd.ExcelWriter(b, engine='openpyxl') as w: pd.DataFrame(st.session_state['carga_acumulada']).to_excel(w, index=False)
-                st.session_state['romaneio_xlsx'] = b.getvalue()
+                buf = io.BytesIO(); 
+                with pd.ExcelWriter(buf, engine='openpyxl') as w: pd.DataFrame(st.session_state['carga_acumulada']).to_excel(w, index=False)
+                st.session_state['romaneio_xlsx'] = buf.getvalue()
                 st.rerun()
             if c_b2.button("🗑️ Limpar"): st.session_state['carga_acumulada']=[]; st.session_state['romaneio_pdf']=None; st.rerun()
             if st.session_state['romaneio_pdf']:
@@ -342,9 +330,3 @@ elif tela == "Vendas":
     renderizar_baixa_por_arquivo(df_db, l)
 
 elif tela == "Sugestoes": st.info("Em breve")
-elif tela == "Dashboard":
-    st.subheader("Visão Geral")
-    df_c = df_db.copy(); df_c['Valor'] = df_c['Estoque_Atual'] * df_c['Custo']
-    k1, k2 = st.columns(2); k1.metric("Total Valor", f"R$ {df_c['Valor'].sum():,.2f}"); k2.metric("Total Itens", int(df_c['Estoque_Atual'].sum()))
-    st.bar_chart(calcular_cmv_mensal().set_index('Loja'))
-elif tela == "Histórico": st.dataframe(carregar_log().sort_values('Data', ascending=False))
