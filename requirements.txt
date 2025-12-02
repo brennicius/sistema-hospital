@@ -1,8 +1,5 @@
 streamlit
 pandas
-plotly
 openpyxl
 streamlit-gsheets
-setuptools
-packaging
-
+plotly
