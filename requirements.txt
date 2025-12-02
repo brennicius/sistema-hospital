@@ -1,7 +1,4 @@
 streamlit
 pandas
-plotly
-fpdf
 openpyxl
 streamlit-gsheets
-st-gsheets-connection
