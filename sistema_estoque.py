@@ -4,70 +4,63 @@ import os
 from datetime import datetime
 from fpdf import FPDF
 import io
-import math
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema Gestão 36.2 (Ajustado)", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sistema Gestão 36.2 (Estável)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
 ARQUIVO_LOG = "historico_log.csv"
 UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel", "🛒 Compras", "📜 Histórico"]
 
-# --- INICIALIZAÇÃO DE ESTADO ---
+# --- INICIALIZAÇÃO DE ESTADO (BLINDADA) ---
 def init_state():
+    # Lista de todas as chaves que o sistema usa
     keys_defaults = {
-        'romaneio_pdf': None, 'romaneio_xlsx': None, 'pedido_pdf': None, 'pedido_xlsx': None,
-        'tela_atual': "Produtos", 'selecao_exclusao': [], 'carga_acumulada': [],
-        'transf_key_ver': 0, 'transf_last_dest': "", 'transf_df_cache': None,
-        'compras_df_cache': None, 'compras_key_ver': 0, 'last_forn': "Todos"
+        'romaneio_pdf': None,
+        'romaneio_xlsx': None,
+        'pedido_pdf': None,
+        'pedido_xlsx': None,
+        'tela_atual': "Compras",
+        'selecao_exclusao': [],
+        'carga_acumulada': [],
+        'transf_key_ver': 0,
+        'transf_last_dest': "",
+        'transf_df_cache': None,
+        'compras_df_cache': None,
+        'compras_key_ver': 0,
+        'last_forn': "Todos"
     }
+    
     for key, default_val in keys_defaults.items():
-        if key not in st.session_state: st.session_state[key] = default_val
+        if key not in st.session_state:
+            st.session_state[key] = default_val
 
 init_state()
 
 # --- FUNÇÕES ---
-def limpar_numero(valor):
-    if pd.isna(valor): return 0.0
-    s = str(valor).lower().replace('r$', '').replace('kg', '').replace('un', '').replace(' ', '')
-    if ',' in s and '.' in s: s = s.replace('.', '').replace(',', '.')
-    else: s = s.replace(',', '.')
-    try: return float(s)
-    except: return 0.0
-
-def limpar_inteiro(valor):
-    """Arredonda para inteiro (Ex: 4.8 -> 5)"""
-    try: return int(round(limpar_numero(valor)))
-    except: return 0
-
-def limpar_codigo(valor):
-    """Remove .0 de códigos numéricos"""
-    if pd.isna(valor): return ""
-    s = str(valor).strip()
-    if s.endswith('.0'): return s[:-2]
-    return s
-
 @st.cache_data
 def carregar_dados():
-    colunas = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
+    colunas = [
+        "Codigo", "Codigo_Unico", "Produto", "Produto_Alt", 
+        "Categoria", "Fornecedor", "Padrao", "Custo", 
+        "Min_SA", "Min_SI", 
+        "Estoque_Central", "Estoque_SA", "Estoque_SI"
+    ]
     if not os.path.exists(ARQUIVO_DADOS):
         df = pd.DataFrame(columns=colunas)
         df.to_csv(ARQUIVO_DADOS, index=False)
         return df
-    try: df = pd.read_csv(ARQUIVO_DADOS)
+    try: return pd.read_csv(ARQUIVO_DADOS)
     except: return pd.DataFrame(columns=colunas)
-    
-    # Garante Tipagem
-    for c in ["Estoque_Central", "Estoque_SA", "Estoque_SI", "Min_SA", "Min_SI"]:
-        if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
-    if "Custo" in df.columns: df["Custo"] = pd.to_numeric(df["Custo"], errors='coerce').fillna(0.0)
-    if "Codigo" not in df.columns: df["Codigo"] = ""
-    df["Codigo"] = df["Codigo"].astype(str).apply(limpar_codigo)
-    
-    return df
 
 def salvar_banco(df):
     df.to_csv(ARQUIVO_DADOS, index=False)
     carregar_dados.clear()
+
+def limpar_numero(valor):
+    if pd.isna(valor): return 0.0
+    s = str(valor).lower().replace('r$', '').replace(' ', '').replace(',', '.')
+    try: return float(s)
+    except: return 0.0
 
 def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
     novo = {"Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Produto": produto, "Quantidade": quantidade, "Tipo": tipo, "Detalhe": origem_destino, "Usuario": usuario}
@@ -75,56 +68,369 @@ def registrar_log(produto, quantidade, tipo, origem_destino, usuario="Sistema"):
     else: df = pd.read_csv(ARQUIVO_LOG)
     pd.concat([df, pd.DataFrame([novo])], ignore_index=True).to_csv(ARQUIVO_LOG, index=False)
 
-# --- PDF FUNÇÕES ---
+# --- PDF ROMANEIO ---
 def criar_pdf_unificado(lista_carga):
     try:
-        pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", 'B', 16)
-        pdf.cell(190, 10, txt="ROMANEIO UNIFICADO", ln=True, align='C')
-        pdf.set_font("Arial", size=10); pdf.cell(190, 10, txt=f"Data: {datetime.now().strftime('%d/%m/%Y')}", ln=True, align='C'); pdf.ln(10)
-        df = pd.DataFrame(lista_carga)
-        piv = df.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
-        for c in ["Hospital Santo Amaro", "Hospital Santa Izabel"]: 
-            if c not in piv.columns: piv[c] = 0
-        pdf.set_fill_color(220,220,220); pdf.set_font("Arial", 'B', 10)
-        pdf.cell(110, 8, "Produto", 1, 0, 'C', 1); pdf.cell(40, 8, "Sto Amaro", 1, 0, 'C', 1); pdf.cell(40, 8, "Sta Izabel", 1, 1, 'C', 1)
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(190, 10, txt="ROMANEIO DE ENTREGA UNIFICADO", ln=True, align='C')
         pdf.set_font("Arial", size=10)
-        for i, r in piv.iterrows():
-            p = str(r['Produto'])[:55].encode('latin-1','replace').decode('latin-1')
-            sa = str(int(r["Hospital Santo Amaro"])) if r["Hospital Santo Amaro"]>0 else "-"
-            si = str(int(r["Hospital Santa Izabel"])) if r["Hospital Santa Izabel"]>0 else "-"
-            pdf.cell(110, 8, p, 1); pdf.cell(40, 8, sa, 1, 0, 'C'); pdf.cell(40, 8, si, 1, 1, 'C')
+        pdf.cell(190, 10, txt=f"Data Emissao: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align='C')
+        pdf.ln(10)
+        
+        df = pd.DataFrame(lista_carga)
+        df_pivot = df.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
+        
+        col_sa = "Hospital Santo Amaro"; col_si = "Hospital Santa Izabel"
+        if col_sa not in df_pivot.columns: df_pivot[col_sa] = 0
+        if col_si not in df_pivot.columns: df_pivot[col_si] = 0
+        
+        pdf.set_fill_color(200, 220, 255); pdf.set_font("Arial", 'B', 10)
+        pdf.cell(110, 10, "Produto", 1, 0, 'C', fill=True)
+        pdf.cell(40, 10, "Qtd Sto Amaro", 1, 0, 'C', fill=True)
+        pdf.cell(40, 10, "Qtd Sta Izabel", 1, 1, 'C', fill=True)
+        
+        pdf.set_font("Arial", size=10)
+        for index, row in df_pivot.iterrows():
+            prod = str(row['Produto']).encode('latin-1', 'replace').decode('latin-1')[:55]
+            qtd_sa = str(int(row[col_sa])) if row[col_sa] > 0 else "-"
+            qtd_si = str(int(row[col_si])) if row[col_si] > 0 else "-"
+            pdf.cell(110, 8, prod, 1, 0, 'L')
+            pdf.cell(40, 8, qtd_sa, 1, 0, 'C')
+            pdf.cell(40, 8, qtd_si, 1, 1, 'C')
+        
+        pdf.ln(20)
+        pdf.cell(60, 10, "_"*30, 0, 0, 'C'); pdf.cell(5, 10, "", 0, 0); pdf.cell(60, 10, "_"*30, 0, 0, 'C'); pdf.cell(5, 10, "", 0, 0); pdf.cell(60, 10, "_"*30, 0, 1, 'C')
+        pdf.set_font("Arial", size=8)
+        pdf.cell(60, 5, "Expedicao (Central)", 0, 0, 'C'); pdf.cell(5, 5, "", 0, 0); pdf.cell(60, 5, "Recebedor (Sto Amaro)", 0, 0, 'C'); pdf.cell(5, 5, "", 0, 0); pdf.cell(60, 5, "Recebedor (Sta Izabel)", 0, 1, 'C')
         return pdf.output(dest='S').encode('latin-1', 'replace')
-    except: return None
+    except Exception as e: return str(e).encode('utf-8')
 
-def criar_pdf_pedido(df, forn, total):
+# --- PDF PEDIDO ---
+def criar_pdf_pedido(dataframe, fornecedor, total):
     try:
-        pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", 'B', 16)
-        pdf.cell(190, 10, txt=f"PEDIDO - {forn}", ln=True, align='C'); pdf.ln(10)
-        pdf.set_fill_color(220,220,220); pdf.set_font("Arial", 'B', 9)
-        pdf.cell(90, 8, "Produto", 1, 0, 'C', 1); pdf.cell(20, 8, "Qtd", 1, 0, 'C', 1); pdf.cell(30, 8, "Total", 1, 1, 'C', 1)
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(190, 10, txt=f"PEDIDO DE COMPRA - {fornecedor.upper()}", ln=True, align='C')
+        pdf.set_font("Arial", size=10)
+        pdf.cell(190, 10, txt=f"Data: {datetime.now().strftime('%d/%m/%Y')}", ln=True, align='C')
+        pdf.ln(10)
+        
+        pdf.set_fill_color(230, 230, 230); pdf.set_font("Arial", 'B', 9)
+        pdf.cell(90, 8, "Produto", 1, 0, 'C', fill=True)
+        pdf.cell(30, 8, "Padrao", 1, 0, 'C', fill=True)
+        pdf.cell(20, 8, "Qtd", 1, 0, 'C', fill=True)
+        pdf.cell(25, 8, "Custo", 1, 0, 'C', fill=True)
+        pdf.cell(25, 8, "Total", 1, 1, 'C', fill=True)
+        
         pdf.set_font("Arial", size=9)
-        for i, r in df.iterrows():
+        for i, r in dataframe.iterrows():
             p = str(r['Produto'])[:45].encode('latin-1','replace').decode('latin-1')
-            pdf.cell(90, 8, p, 1); pdf.cell(20, 8, str(int(r['Qtd Compra'])), 1, 0, 'C'); pdf.cell(30, 8, f"{r['Total Item']:.2f}", 1, 1, 'R')
-        pdf.ln(5); pdf.set_font("Arial", 'B', 12); pdf.cell(190, 10, txt=f"TOTAL: R$ {total:,.2f}", ln=True, align='R')
+            e = str(r.get('Padrao','-')).encode('latin-1','replace').decode('latin-1')
+            q = int(r['Qtd Compra'])
+            c = float(r['Custo'])
+            t = float(r['Total Item'])
+            
+            pdf.cell(90, 8, p, 1, 0, 'L')
+            pdf.cell(30, 8, e, 1, 0, 'C')
+            pdf.cell(20, 8, str(q), 1, 0, 'C')
+            pdf.cell(25, 8, f"R$ {c:.2f}", 1, 0, 'R')
+            pdf.cell(25, 8, f"R$ {t:.2f}", 1, 1, 'R')
+        
+        pdf.ln(5); pdf.set_font("Arial", 'B', 12)
+        pdf.cell(190, 10, txt=f"TOTAL GERAL: R$ {total:,.2f}", ln=True, align='R')
         return pdf.output(dest='S').encode('latin-1', 'replace')
-    except: return None
+    except Exception as e: return str(e).encode('utf-8')
 
-# --- MENU ---
+
+# --- MENU SUPERIOR ---
 st.markdown("<h2 style='text-align: center; color: #2E86C1;'>Sistema de Gestão Hospitalar</h2>", unsafe_allow_html=True)
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-def btn(c, t, i, k):
-    if c.button(f"{i}\n{t}", key=k, use_container_width=True, type="primary" if st.session_state['tela_atual']==k else "secondary"):
-        st.session_state['tela_atual'] = k; st.rerun()
-btn(c1,"Estoque","📦","Estoque"); btn(c2,"Transf.","🚚","Transferencia"); btn(c3,"Compras","🛒","Compras")
-btn(c4,"Produtos","📋","Produtos"); btn(c5,"Vendas","📉","Vendas"); btn(c6,"Histórico","📜","Historico")
 st.markdown("---")
 
-tela = st.session_state['tela_atual']
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+def botao(col, txt, ico, nome_t):
+    estilo = "primary" if st.session_state.get('tela_atual') == nome_t else "secondary"
+    if col.button(f"{ico}\n{txt}", key=nome_t, use_container_width=True, type=estilo):
+        st.session_state['tela_atual'] = nome_t
+        st.rerun()
+
+botao(c1, "Estoque", "📦", "Estoque")
+botao(c2, "Transferir", "🚚", "Transferencia")
+botao(c3, "Compras", "🛒", "Compras")
+botao(c4, "Produtos", "📋", "Produtos")
+botao(c5, "Vendas", "📉", "Vendas")
+botao(c6, "Sugestões", "💡", "Sugestoes")
+
+st.markdown("---")
+
+tela = st.session_state.get('tela_atual', "Estoque")
 df_db = carregar_dados()
 
-# --- TELA PRODUTOS (COM AJUSTE PARA SUA PLANILHA) ---
-if tela == "Produtos":
+# =================================================================================
+# 🛒 TELA DE COMPRAS
+# =================================================================================
+if tela == "Compras":
+    st.header("🛒 Gestão de Compras")
+    
+    col_forn, col_vazio = st.columns([1, 2])
+    lista_fornecedores = ["Todos"] + sorted([str(x) for x in df_db['Fornecedor'].dropna().unique()])
+    forn_sel = col_forn.selectbox("Filtrar por Fornecedor:", lista_fornecedores)
+    
+    if forn_sel != st.session_state.get('last_forn'):
+        st.session_state['compras_df_cache'] = None
+        st.session_state['compras_key_ver'] = st.session_state.get('compras_key_ver', 0) + 1
+        st.session_state['last_forn'] = forn_sel
+        st.session_state['pedido_pdf'] = None
+        st.session_state['pedido_xlsx'] = None
+
+    st.divider()
+
+    if st.button("🪄 Calcular Sugestão (Meta - Estoque Total)"):
+        if forn_sel == "Todos": df_calc = df_db.copy()
+        else: df_calc = df_db[df_db['Fornecedor'] == forn_sel].copy()
+            
+        df_calc['Meta Global'] = df_calc['Min_SA'] + df_calc['Min_SI']
+        df_calc['Estoque Total'] = df_calc['Estoque_Central'] + df_calc['Estoque_SA'] + df_calc['Estoque_SI']
+        df_calc['Qtd Compra'] = (df_calc['Meta Global'] - df_calc['Estoque Total']).apply(lambda x: max(0, int(x)))
+        
+        st.session_state['compras_df_cache'] = df_calc
+        st.session_state['compras_key_ver'] += 1
+        st.success("Sugestão calculada!")
+        st.rerun()
+
+    if st.session_state.get('compras_df_cache') is not None:
+        df_view = st.session_state['compras_df_cache'].copy()
+    else:
+        if forn_sel == "Todos": df_view = df_db.copy()
+        else: df_view = df_db[df_db['Fornecedor'] == forn_sel].copy()
+        df_view['Meta Global'] = df_view['Min_SA'] + df_view['Min_SI']
+        df_view['Estoque Total'] = df_view['Estoque_Central'] + df_view['Estoque_SA'] + df_view['Estoque_SI']
+        df_view['Qtd Compra'] = 0
+
+    busca_compra = st.text_input("🔍 Buscar Produto na Lista:", "")
+    if busca_compra: df_view = df_view[df_view['Produto'].str.contains(busca_compra, case=False, na=False)]
+
+    df_view['Valor Total'] = df_view['Qtd Compra'] * df_view['Custo']
+
+    edited_df = st.data_editor(
+        df_view[['Produto', 'Fornecedor', 'Padrao', 'Estoque Total', 'Meta Global', 'Custo', 'Qtd Compra']],
+        column_config={
+            "Produto": st.column_config.TextColumn(disabled=True),
+            "Fornecedor": st.column_config.TextColumn(disabled=True),
+            "Padrao": st.column_config.TextColumn("Emb.", disabled=True, width="small"),
+            "Estoque Total": st.column_config.NumberColumn("Atual", disabled=True, format="%d"),
+            "Meta Global": st.column_config.NumberColumn("Meta", disabled=True, format="%d"),
+            "Custo": st.column_config.NumberColumn("Custo Un.", disabled=True, format="R$ %.2f"),
+            "Qtd Compra": st.column_config.NumberColumn("🛒 Comprar", min_value=0, step=1, format="%d")
+        },
+        use_container_width=True,
+        hide_index=True,
+        height=500,
+        key=f"editor_compras_{st.session_state.get('compras_key_ver', 0)}"
+    )
+    
+    total_itens = int(edited_df['Qtd Compra'].sum())
+    total_valor = (edited_df['Qtd Compra'] * edited_df['Custo']).sum()
+    
+    st.divider()
+    c_tot1, c_tot2 = st.columns(2)
+    c_tot1.metric("Itens a Comprar", total_itens)
+    c_tot2.metric("Valor Estimado", f"R$ {total_valor:,.2f}")
+    
+    c_act1, c_act2, c_act3 = st.columns(3)
+    
+    if c_act1.button("📄 Gerar Pedido (Processar)", type="primary"):
+        itens_compra = edited_df[edited_df['Qtd Compra'] > 0].copy()
+        itens_compra['Total Item'] = itens_compra['Qtd Compra'] * itens_compra['Custo']
+        
+        if itens_compra.empty:
+            st.warning("Nenhum item para comprar.")
+        else:
+            pdf_bytes = criar_pdf_pedido(itens_compra, forn_sel, total_valor)
+            st.session_state['pedido_pdf'] = pdf_bytes
+            
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                itens_compra.to_excel(writer, index=False, sheet_name='Pedido')
+            st.session_state['pedido_xlsx'] = buf.getvalue()
+            
+            registrar_log("Vários", total_itens, "Pedido Compra", f"Forn: {forn_sel} | Valor: R$ {total_valor:.2f}")
+            st.rerun()
+
+    if st.session_state.get('pedido_pdf'):
+        c_act2.download_button("⬇️ Baixar PDF", st.session_state['pedido_pdf'], "Pedido_Compra.pdf", "application/pdf")
+        c_act3.download_button("⬇️ Baixar Excel", st.session_state['pedido_xlsx'], "Pedido_Compra.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# =================================================================================
+# 🚚 TRANSFERÊNCIA
+# =================================================================================
+elif tela == "Transferencia":
+    st.header("🚚 Transferência / Montagem de Carga")
+    col_esquerda, col_direita = st.columns([1.5, 1])
+    with col_esquerda:
+        with st.container(border=True):
+            st.markdown("### 1. Adicionar Itens")
+            lojas_opcoes = ["Hospital Santo Amaro", "Hospital Santa Izabel"]
+            destino_sel = st.selectbox("Para onde vai?", lojas_opcoes)
+            if destino_sel != st.session_state.get('transf_last_dest'):
+                st.session_state['transf_df_cache'] = None
+                st.session_state['transf_key_ver'] = st.session_state.get('transf_key_ver', 0) + 1
+                st.session_state['transf_last_dest'] = destino_sel
+            if "Amaro" in destino_sel: col_estoque_loja = "Estoque_SA"; col_minimo = "Min_SA"
+            else: col_estoque_loja = "Estoque_SI"; col_minimo = "Min_SI"
+            
+            if st.button("🪄 Preencher Sugestão"):
+                df_calc = df_db[['Produto', 'Estoque_Central', col_estoque_loja, col_minimo]].copy()
+                df_calc['Sugestao'] = df_calc[col_minimo] - df_calc[col_estoque_loja]
+                df_calc['Sugestao'] = df_calc['Sugestao'].apply(lambda x: max(0, int(x)))
+                df_calc['➡️ Enviar'] = df_calc[['Sugestao', 'Estoque_Central']].min(axis=1).astype(int)
+                st.session_state['transf_df_cache'] = df_calc
+                st.session_state['transf_key_ver'] += 1
+                st.success("Preenchido!"); st.rerun()
+
+            if st.session_state.get('transf_df_cache') is not None: df_view = st.session_state['transf_df_cache'].copy()
+            else:
+                df_view = df_db[['Produto', 'Estoque_Central', col_estoque_loja, col_minimo]].copy()
+                df_view['➡️ Enviar'] = 0
+            
+            busca = st.text_input("🔍 Buscar:", "")
+            if busca: df_view = df_view[df_view['Produto'].str.contains(busca, case=False, na=False)]
+            
+            edited_df = st.data_editor(
+                df_view,
+                column_config={"Produto": st.column_config.TextColumn(disabled=True), "Estoque_Central": st.column_config.NumberColumn("Central", disabled=True, format="%d"), col_estoque_loja: st.column_config.NumberColumn("Loja", disabled=True, format="%d"), col_minimo: st.column_config.NumberColumn("Meta", disabled=True, format="%d"), "➡️ Enviar": st.column_config.NumberColumn(min_value=0, step=1, format="%d"), "Sugestao": None},
+                use_container_width=True, hide_index=True, height=400, key=f"editor_transf_{st.session_state['transf_key_ver']}"
+            )
+            
+            if st.button("📦 Adicionar à Carga", type="primary"):
+                itens_enviar = edited_df[edited_df['➡️ Enviar'] > 0]
+                if itens_enviar.empty: st.warning("Vazio.")
+                else:
+                    erro = False; temp_lista = []
+                    for idx, row in itens_enviar.iterrows():
+                        prod = row['Produto']; qtd = int(row['➡️ Enviar'])
+                        idx_db = df_db[df_db['Produto'] == prod].index[0]
+                        saldo_real = df_db.at[idx_db, 'Estoque_Central']
+                        if qtd > saldo_real: st.error(f"Erro: {prod} só tem {int(saldo_real)}."); erro = True; break
+                        df_db.at[idx_db, 'Estoque_Central'] -= qtd
+                        if "Amaro" in destino_sel: df_db.at[idx_db, 'Estoque_SA'] += qtd
+                        else: df_db.at[idx_db, 'Estoque_SI'] += qtd
+                        registrar_log(prod, qtd, "Transferência", f"Central -> {destino_sel}")
+                        temp_lista.append({"Destino": destino_sel, "Produto": prod, "Quantidade": qtd})
+                    if not erro:
+                        salvar_banco(df_db); st.session_state['carga_acumulada'].extend(temp_lista); st.session_state['transf_df_cache'] = None; st.session_state['transf_key_ver'] += 1; st.success(f"{len(temp_lista)} adicionados!"); st.rerun()
+
+    with col_direita:
+        with st.container(border=True):
+            st.markdown("### 2. Carga Completa")
+            if len(st.session_state['carga_acumulada']) > 0:
+                with st.expander("❌ Remover Item"):
+                    lista_display = [f"{i} | {d['Produto']} -> {d['Destino']} ({d['Quantidade']})" for i, d in enumerate(st.session_state['carga_acumulada'])]
+                    itens_remover = st.multiselect("Selecione:", lista_display)
+                    if st.button("Confirmar Remoção"):
+                        indices = [int(s.split(" | ")[0]) for s in itens_remover]
+                        for idx in indices:
+                            item = st.session_state['carga_acumulada'][idx]
+                            p = item['Produto']; q = item['Quantidade']; dest = item['Destino']
+                            idx_db = df_db[df_db['Produto'] == p].index
+                            if not idx_db.empty:
+                                i_db = idx_db[0]; df_db.at[i_db, 'Estoque_Central'] += q 
+                                if "Amaro" in dest: df_db.at[i_db, 'Estoque_SA'] -= q
+                                else: df_db.at[i_db, 'Estoque_SI'] -= q
+                        st.session_state['carga_acumulada'] = [val for i, val in enumerate(st.session_state['carga_acumulada']) if i not in indices]
+                        salvar_banco(df_db); st.success("Estornado!"); st.rerun()
+
+                df_carga = pd.DataFrame(st.session_state['carga_acumulada'])
+                try: 
+                    df_pivot = df_carga.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0).reset_index()
+                    st.dataframe(df_pivot, use_container_width=True, hide_index=True, height=300)
+                except: st.dataframe(df_carga, use_container_width=True)
+                
+                c_btn1, c_btn2 = st.columns(2)
+                if c_btn1.button("✅ Finalizar"):
+                    try:
+                        pdf_bytes = criar_pdf_unificado(st.session_state['carga_acumulada'])
+                        st.session_state['romaneio_pdf'] = pdf_bytes
+                        buf = io.BytesIO()
+                        with pd.ExcelWriter(buf, engine='openpyxl') as writer: 
+                            try: df_pivot.to_excel(writer, index=False, sheet_name='Romaneio')
+                            except: df_carga.to_excel(writer, index=False, sheet_name='Romaneio')
+                        st.session_state['romaneio_xlsx'] = buf.getvalue()
+                        st.rerun()
+                    except: st.error("Erro ao gerar arquivos.")
+                if c_btn2.button("🗑️ Limpar"):
+                    st.session_state['carga_acumulada'] = []; st.session_state['romaneio_pdf'] = None; st.rerun()
+                
+                if st.session_state['romaneio_pdf']:
+                    st.success("Pronto!")
+                    c_d1, c_d2 = st.columns(2)
+                    c_d1.download_button("📄 PDF", st.session_state['romaneio_pdf'], "Romaneio.pdf", "application/pdf")
+                    c_d2.download_button("📊 Excel", st.session_state['romaneio_xlsx'], "Romaneio.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            else: st.info("Vazia.")
+
+# =================================================================================
+# 📦 TELA DE ESTOQUE (MANTIDA)
+# =================================================================================
+elif tela == "Estoque":
+    st.header("📦 Atualização de Estoque (Contagem)")
+    locais = {"Depósito Geral (Central)": "Estoque_Central", "Hospital Santo Amaro": "Estoque_SA", "Hospital Santa Izabel": "Estoque_SI"}
+    c_loc, _ = st.columns([1,2])
+    loc_sel = c_loc.selectbox("Local:", list(locais.keys()))
+    col_dest = locais[loc_sel]
+    
+    with st.expander("📂 Importar Planilha de Contagem"):
+        arq = st.file_uploader("Arquivo", type=["xlsx", "csv"], key="up_est")
+        if arq:
+            try:
+                if arq.name.endswith('.csv'): df_t = pd.read_csv(arq, header=None)
+                else: df_t = pd.read_excel(arq, header=None)
+                hr = 0
+                for i, r in df_t.head(20).iterrows():
+                    if any("código" in str(x).lower() or "produto" in str(x).lower() for x in r.values): 
+                        hr = i; break
+                arq.seek(0)
+                if arq.name.endswith('.csv'): df_n = pd.read_csv(arq, header=hr)
+                else: df_n = pd.read_excel(arq, header=hr)
+                
+                cols = df_n.columns.tolist()
+                c1, c2, c3 = st.columns(3)
+                ic = next((i for i,c in enumerate(cols) if "cod" in str(c).lower()),0)
+                inm = next((i for i,c in enumerate(cols) if "nom" in str(c).lower() or "prod" in str(c).lower()),0)
+                iq = next((i for i,c in enumerate(cols) if "qtd" in str(c).lower() or "sald" in str(c).lower()),0)
+                
+                cc = c1.selectbox("Col Código", cols, index=ic)
+                cn = c2.selectbox("Col Nome", cols, index=inm)
+                cq = c3.selectbox("Col Qtd", cols, index=iq)
+                
+                if st.button("🚀 Processar"):
+                    att = 0; novos = []
+                    bar = st.progress(0)
+                    for i, r in df_n.iterrows():
+                        bar.progress((i+1)/len(df_n))
+                        cod = str(r[cc]).strip(); nom = str(r[cn]).strip(); qtd = limpar_numero(r[cq])
+                        if not nom or nom=='nan': continue
+                        m = df_db[(df_db['Codigo']==cod)|(df_db['Codigo_Unico']==cod)]
+                        if m.empty: m = df_db[df_db['Produto']==nom]
+                        if not m.empty: df_db.at[m.index[0], col_dest] = qtd; att+=1
+                        else:
+                            n = {"Codigo": cod, "Produto": nom, "Categoria": "Novo", "Fornecedor": "Geral", "Padrao": "Un", "Custo": 0, "Min_SA":0, "Min_SI":0, "Estoque_Central":0, "Estoque_SA":0, "Estoque_SI":0}
+                            n[col_dest] = qtd; df_db = pd.concat([df_db, pd.DataFrame([n])], ignore_index=True); novos.append(nom)
+                    salvar_banco(df_db); bar.empty(); st.success(f"{att} Atualizados!"); 
+                    if novos: st.warning(f"{len(novos)} Novos cadastrados.")
+            except Exception as e: st.error(f"Erro: {e}")
+    st.divider()
+    filt = st.text_input("Filtrar:", placeholder="Nome...")
+    v = df_db[df_db['Produto'].str.contains(filt, case=False, na=False)] if filt else df_db
+    st.dataframe(v[['Codigo', 'Produto', 'Padrao', col_dest]], use_container_width=True, hide_index=True)
+
+# =================================================================================
+# 📋 TELA DE PRODUTOS
+# =================================================================================
+elif tela == "Produtos":
     st.header("📋 Cadastro Geral")
     with st.expander("📂 Importar Cadastro Mestre"):
         c_upl, c_cat = st.columns([2, 1])
@@ -134,46 +440,21 @@ if tela == "Produtos":
             try:
                 if arq.name.endswith('.csv'): df_n = pd.read_csv(arq)
                 else: df_n = pd.read_excel(arq)
-                
                 cols = df_n.columns
                 def fnd(k): 
                     for c in cols: 
-                        if any(x in str(c).lower() for x in k): return c
+                        if any(x in c.lower() for x in k): return c
                     return None
-                
-                # Mapeamento ajustado para sua planilha
-                cc = fnd(['código','codigo']) # Coluna A
-                cn = fnd(['produto 1','nome produto', 'descrição']) # Coluna C
-                cf = fnd(['fornec'])
-                cp = fnd(['padr', 'emb'])
-                ccst = fnd(['cust', 'unit'])
-                cma = fnd(['amaro', 'sa'])
-                cmi = fnd(['izabel', 'si'])
-                
+                cc = fnd(['código','codigo']); cn = fnd(['produto 1','nome']); cf = fnd(['fornec']); cp = fnd(['padr']); ccst = fnd(['cust']); cma = fnd(['amaro']); cmi = fnd(['izabel'])
                 cnt=0
-                # Atualiza DataFrame na memória
                 for i, r in df_n.iterrows():
                     p = str(r[cn]).strip()
                     if not p or p=='nan': continue
-                    
-                    # Valores limpos
-                    v_cod = limpar_codigo(r[cc]) if cc else ""
-                    v_forn = str(r[cf]) if cf else "Geral"
-                    v_padr = str(r[cp]) if cp else ""
-                    v_cust = limpar_numero(r[ccst]) if ccst else 0.0
-                    v_msa = limpar_inteiro(r[cma]) if cma else 0
-                    v_msi = limpar_inteiro(r[cmi]) if cmi else 0
-
-                    d = {
-                        "Codigo": v_cod, "Produto": p, "Categoria": cat,
-                        "Fornecedor": v_forn, "Padrao": v_padr, "Custo": v_cust,
-                        "Min_SA": v_msa, "Min_SI": v_msi
-                    }
-                    
-                    m = df_db['Produto'] == p
-                    if m.any():
+                    d = {"Codigo": str(r[cc]) if cc else "", "Produto": p, "Categoria": cat, "Fornecedor": str(r[cf]) if cf else "", "Padrao": str(r[cp]) if cp else "", "Custo": limpar_numero(r[ccst]) if ccst else 0, "Min_SA": limpar_numero(r[cma]) if cma else 0, "Min_SI": limpar_numero(r[cmi]) if cmi else 0}
+                    m = df_db['Produto']==p
+                    if m.any(): 
                         for k,v in d.items(): df_db.loc[m, k] = v
-                    else:
+                    else: 
                         d.update({"Estoque_Central":0, "Estoque_SA":0, "Estoque_SI":0})
                         df_db = pd.concat([df_db, pd.DataFrame([d])], ignore_index=True)
                     cnt+=1
@@ -181,12 +462,18 @@ if tela == "Produtos":
             except Exception as e: st.error(f"Erro: {e}")
             
     st.divider()
+    
+    # BOTÃO ZONA DE PERIGO
+    with st.expander("🔥 Apagar Tudo"):
+        if st.button("🗑️ ZERAR BANCO"):
+            colunas_limpas = ["Codigo", "Codigo_Unico", "Produto", "Produto_Alt", "Categoria", "Fornecedor", "Padrao", "Custo", "Min_SA", "Min_SI", "Estoque_Central", "Estoque_SA", "Estoque_SI"]
+            salvar_banco(pd.DataFrame(columns=colunas_limpas)); st.success("Zerado!"); st.rerun()
+
     a1, a2, a3 = st.tabs(["☕ Café", "🍎 Perecíveis", "📋 Todos"])
     def show(c):
         d = df_db if c=="Todos" else df_db[df_db['Categoria']==c]
         if not d.empty:
-            # Mostra colunas importantes (Código e Mínimos inclusos)
-            st.dataframe(d[['Codigo','Produto','Fornecedor','Padrao','Custo', 'Min_SA', 'Min_SI']].style.format({"Custo": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
+            st.dataframe(d[['Codigo','Produto','Fornecedor','Padrao','Custo']].style.format({"Custo": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
             cd1, cd2 = st.columns([4,1])
             sel = cd1.selectbox(f"Excluir ({c})", d['Produto'].unique(), key=f"d_{c}", index=None)
             if sel and cd2.button("🗑️", key=f"b_{c}"):
@@ -196,144 +483,6 @@ if tela == "Produtos":
     with a2: show("Perecíveis"); 
     with a3: show("Todos")
 
-# --- ESTOQUE ---
-elif tela == "Estoque":
-    st.header("📦 Estoque (Contagem)")
-    cl, _ = st.columns([1,2]); loc = cl.selectbox("Local", ["Estoque Central", "Hosp. Santo Amaro", "Hosp. Santa Izabel"])
-    cmap = {"Estoque Central":"Estoque_Central", "Hosp. Santo Amaro":"Estoque_SA", "Hosp. Santa Izabel":"Estoque_SI"}
-    cdest = cmap[loc]
-    
-    with st.expander("📂 Importar Contagem"):
-        f = st.file_uploader("Arquivo", key="up1")
-        if f and st.button("Processar"):
-            try:
-                d = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
-                # Auto-Header 
-                h=0
-                for i,r in d.head(20).iterrows():
-                    if any("prod" in str(x).lower() for x in r.values): h=i; break
-                f.seek(0)
-                d = pd.read_csv(f, header=h) if f.name.endswith('.csv') else pd.read_excel(f, header=h)
-                
-                cols = d.columns.tolist()
-                ic = next((i for i,c in enumerate(cols) if "cod" in str(c).lower()),0)
-                inm = next((i for i,c in enumerate(cols) if "nom" in str(c).lower() or "prod" in str(c).lower()),0)
-                iq = next((i for i,c in enumerate(cols) if "qtd" in str(c).lower() or "sald" in str(c).lower()),0)
-                
-                c1, c2, c3 = st.columns(3)
-                cc = c1.selectbox("Cod", cols, index=ic)
-                cn = c2.selectbox("Nome", cols, index=inm)
-                cq = c3.selectbox("Qtd", cols, index=iq)
-                
-                cnt=0
-                for i, r in d.iterrows():
-                    cod = str(r[cc]).strip()
-                    p = str(r[cn]).strip()
-                    q = limpar_inteiro(r[cq])
-                    if p and p!='nan':
-                        # Busca por Código OU Nome
-                        m = df_db[(df_db['Codigo']==cod) | (df_db['Produto']==p)]
-                        if not m.empty: 
-                            df_db.loc[m.index, cdest] = q
-                            cnt+=1
-                        else:
-                            # Auto-Cadastro se não achar
-                            novo = {c:0 for c in df_db.columns}
-                            novo.update({"Codigo":cod, "Produto":p, cdest:q, "Categoria":"Novo", "Fornecedor":"Geral"})
-                            df_db = pd.concat([df_db, pd.DataFrame([novo])], ignore_index=True)
-                            cnt+=1
-                salvar_banco(df_db); st.success(f"{cnt} ok!"); st.rerun()
-            except Exception as e: st.error(f"Erro: {e}")
-            
-    st.divider()
-    st.dataframe(df_db[['Codigo','Produto','Padrao',cdest]].style.format({cdest:"{:.0f}"}), use_container_width=True)
-
-# --- TRANSFERÊNCIA ---
-elif tela == "Transferencia":
-    st.header("🚚 Transferência")
-    c1, c2 = st.columns([1.5, 1])
-    with c1:
-        dest = st.selectbox("Para:", ["Hospital Santo Amaro", "Hospital Santa Izabel"])
-        if dest != st.session_state.get('transf_last_dest'): st.session_state['transf_df_cache']=None; st.session_state['transf_last_dest']=dest
-        ce = "Estoque_SA" if "Amaro" in dest else "Estoque_SI"; cm = "Min_SA" if "Amaro" in dest else "Min_SI"
-        
-        if st.button("🪄 Sugestão"):
-            d = df_db[['Produto','Estoque_Central',ce,cm]].copy()
-            d['S'] = (d[cm]-d[ce]).apply(lambda x: max(0, int(x)))
-            d['E'] = d[['S','Estoque_Central']].min(axis=1).astype(int)
-            st.session_state['transf_df_cache'] = d; st.rerun()
-            
-        dv = st.session_state['transf_df_cache'].copy() if st.session_state['transf_df_cache'] is not None else df_db[['Produto','Estoque_Central',ce,cm]].assign(E=0)
-        bs = st.text_input("Buscar:", "")
-        if bs: dv = dv[dv['Produto'].str.contains(bs, case=False, na=False)]
-        
-        ed = st.data_editor(dv, column_config={"Produto":st.column_config.TextColumn(disabled=True), "Estoque_Central":st.column_config.NumberColumn(disabled=True), "E":st.column_config.NumberColumn("Enviar", min_value=0, step=1), "S":None}, use_container_width=True, height=400)
-        
-        if st.button("📦 Adicionar"):
-            it = ed[ed['E']>0]
-            if not it.empty:
-                ls = []
-                for i,r in it.iterrows():
-                    p=r['Produto']; q=int(r['E'])
-                    idx = df_db[df_db['Produto']==p].index[0]
-                    df_db.at[idx, 'Estoque_Central'] -= q
-                    df_db.at[idx, ce] += q
-                    ls.append({"Destino":dest, "Produto":p, "Quantidade":q})
-                salvar_banco(df_db); st.session_state['carga_acumulada'].extend(ls); st.session_state['transf_df_cache']=None; st.success("Ok!"); st.rerun()
-    with c2:
-        if st.session_state['carga_acumulada']:
-            dfc = pd.DataFrame(st.session_state['carga_acumulada'])
-            try: st.dataframe(dfc.pivot_table(index='Produto', columns='Destino', values='Quantidade', aggfunc='sum', fill_value=0), use_container_width=True)
-            except: st.dataframe(dfc)
-            c_b1, c_b2 = st.columns(2)
-            if c_b1.button("✅ Finalizar"):
-                st.session_state['romaneio_pdf'] = criar_pdf_unificado(st.session_state['carga_acumulada'])
-                b = io.BytesIO(); 
-                with pd.ExcelWriter(b, engine='openpyxl') as w: pd.DataFrame(st.session_state['carga_acumulada']).to_excel(w, index=False)
-                st.session_state['romaneio_xlsx'] = b.getvalue()
-                st.rerun()
-            if c_b2.button("🗑️ Limpar"): st.session_state['carga_acumulada']=[]; st.session_state['romaneio_pdf']=None; st.rerun()
-            if st.session_state['romaneio_pdf']:
-                st.download_button("PDF", st.session_state['romaneio_pdf'], "Rom.pdf", "application/pdf")
-                st.download_button("XLS", st.session_state['romaneio_xlsx'], "Rom.xlsx")
-        else: st.info("Vazio")
-
-# --- COMPRAS ---
-elif tela == "Compras":
-    st.header("🛒 Compras")
-    l = ["Todos"] + sorted([str(x) for x in df_db['Fornecedor'].unique() if str(x)!='nan'])
-    sel = st.selectbox("Fornecedor", l)
-    
-    if st.button("🪄 Sugestão"):
-        d = df_db.copy() if sel=="Todos" else df_db[df_db['Fornecedor']==sel].copy()
-        d['Meta'] = d['Min_SA'] + d['Min_SI']
-        d['Total'] = d['Estoque_Central'] + d['Estoque_SA'] + d['Estoque_SI']
-        d['Compra'] = (d['Meta'] - d['Total']).apply(lambda x: max(0, int(x)))
-        st.session_state['compras_df_cache'] = d; st.rerun()
-        
-    v = st.session_state['compras_df_cache'].copy() if st.session_state['compras_df_cache'] is not None else (df_db.copy() if sel=="Todos" else df_db[df_db['Fornecedor']==sel].copy())
-    if 'Qtd Compra' not in v.columns: v['Qtd Compra'] = 0
-    
-    bus = st.text_input("Buscar:", key="bs_c")
-    if bus: v = v[v['Produto'].str.contains(bus, case=False, na=False)]
-    
-    v['Total'] = v['Qtd Compra'] * v['Custo']
-    ed = st.data_editor(v[['Produto','Fornecedor','Custo','Qtd Compra','Total']], column_config={"Qtd Compra":st.column_config.NumberColumn(min_value=0, step=1)}, use_container_width=True, height=500)
-    
-    tot = ed['Total'].sum(); st.metric("Total", f"R$ {tot:,.2f}")
-    c1, c2 = st.columns(2)
-    if c1.button("📄 PDF"):
-        i = ed[ed['Qtd Compra']>0].copy(); i['Total Item'] = i['Total']
-        if not i.empty:
-            st.session_state['pedido_pdf'] = criar_pdf_pedido(i, sel, tot)
-            b = io.BytesIO(); 
-            with pd.ExcelWriter(b, engine='openpyxl') as w: i.to_excel(w, index=False)
-            st.session_state['pedido_xlsx'] = b.getvalue()
-            st.rerun()
-    if st.session_state['pedido_pdf']:
-        c1.download_button("PDF", st.session_state['pedido_pdf'], "Ped.pdf", "application/pdf")
-        c2.download_button("Excel", st.session_state['pedido_xlsx'], "Ped.xlsx")
-
-# --- DEMAIS TELAS ---
-elif tela == "Vendas": st.info("Em breve")
-elif tela == "Sugestoes": st.info("Em breve")
+# --- OUTRAS TELAS ---
+elif tela == "Vendas": st.title("📉 Vendas"); st.info("Em breve...")
+elif tela == "Sugestoes": st.title("💡 Sugestões"); st.info("Em breve...")
