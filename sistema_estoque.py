@@ -5,6 +5,8 @@ from datetime import datetime
 from fpdf import FPDF
 import io
 
+# from fpdf import FPDF
+
 # --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="Sistema 27.6 (Smart Upload)", layout="wide", initial_sidebar_state="collapsed")
 ARQUIVO_DADOS = "banco_dados.csv"
@@ -422,3 +424,4 @@ else:
         
         st.dataframe(df_l[['Produto', 'Estoque_Atual', 'Media_Vendas_Semana']], use_container_width=True)
     else: st.info("Vazio")
+
