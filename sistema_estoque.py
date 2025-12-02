@@ -13,7 +13,6 @@ UNIDADES = ["📊 Dashboard", "Estoque Central", "Hosp. Santo Amaro", "Hosp. San
 
 # --- INICIALIZAÇÃO DE ESTADO (BLINDADA) ---
 def init_state():
-    # Lista de todas as chaves que o sistema usa
     keys_defaults = {
         'romaneio_pdf': None,
         'romaneio_xlsx': None,
@@ -395,17 +394,12 @@ elif tela == "Estoque":
                 arq.seek(0)
                 if arq.name.endswith('.csv'): df_n = pd.read_csv(arq, header=hr)
                 else: df_n = pd.read_excel(arq, header=hr)
-                
                 cols = df_n.columns.tolist()
                 c1, c2, c3 = st.columns(3)
                 ic = next((i for i,c in enumerate(cols) if "cod" in str(c).lower()),0)
                 inm = next((i for i,c in enumerate(cols) if "nom" in str(c).lower() or "prod" in str(c).lower()),0)
                 iq = next((i for i,c in enumerate(cols) if "qtd" in str(c).lower() or "sald" in str(c).lower()),0)
-                
-                cc = c1.selectbox("Col Código", cols, index=ic)
-                cn = c2.selectbox("Col Nome", cols, index=inm)
-                cq = c3.selectbox("Col Qtd", cols, index=iq)
-                
+                cc = c1.selectbox("Col Código", cols, index=ic); cn = c2.selectbox("Col Nome", cols, index=inm); cq = c3.selectbox("Col Qtd", cols, index=iq)
                 if st.button("🚀 Processar"):
                     att = 0; novos = []
                     bar = st.progress(0)
